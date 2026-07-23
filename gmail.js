@@ -34,6 +34,9 @@
 //                                 multipart/alternative (text + HTML, newlines to
 //                                 <br>) so paragraph breaks survive editing in HTML
 //                                 mail clients. --sig appends an optional HTML signature.
+//   drafts [account] [--max N]    list unsent drafts (draft id, thread, to, subject)
+//   draft-discard [account] <draftId>  delete an UNSENT draft (sent mail is never
+//                                 deletable here; this only affects drafts)
 //   archive [account] <msgId...>  remove INBOX, add <prefix>/archived
 //   trash [account] <msgId...>    add <prefix>/trashed, move to Trash
 //   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/*
@@ -559,6 +562,22 @@ else if (cmd === "inbox") {
 } else if (cmd === "draft") {
   const [key, rest] = takeAccount(args, "draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attachmentPath...]");
   await cmdDraft(key, rest);
+} else if (cmd === "drafts") {
+  // List existing drafts (id, thread, subject) so a stale draft can be found and discarded.
+  const [key, rest] = takeAccount(args, "drafts [account] [--max N]");
+  const maxIdx = rest.indexOf("--max");
+  const max = maxIdx >= 0 ? Number(rest[maxIdx + 1]) : 20;
+  const list = await api(key, `drafts?maxResults=${max}`);
+  for (const d of list.drafts ?? []) {
+    const m = await api(key, `messages/${d.message.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=To`);
+    console.log(JSON.stringify({ draft_id: d.id, message_id: d.message.id, thread_id: d.message.threadId, to: header(m, "To"), subject: header(m, "Subject") }));
+  }
+} else if (cmd === "draft-discard") {
+  // Discards an unsent DRAFT (drafts.delete). Messages/threads are never deletable here.
+  const [key, rest] = takeAccount(args, "draft-discard [account] <draftId>");
+  if (!rest[0]) die("usage: draft-discard [account] <draftId>");
+  await api(key, `drafts/${rest[0]}`, { method: "DELETE" });
+  console.log(JSON.stringify({ discarded: rest[0] }));
 } else if (cmd === "archive") {
   const [key, ids] = takeAccount(args, "archive [account] <msgId...>");
   for (const id of ids) await modify(key, id, [`${LABEL_PREFIX}/archived`], ["INBOX"]);
@@ -588,5 +607,5 @@ else if (cmd === "inbox") {
   for (const id of ids) await modify(key, id, [name], []);
   console.log(`labeled ${ids.length}`);
 } else {
-  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | archive | trash | restore | label (no send, by design)");
+  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label (no send, by design)");
 }

@@ -1,6 +1,6 @@
 {
   "name": "friday-gmail-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A zero-dependency Gmail CLI for AI agents that structurally cannot send email. It reads, labels, and drafts; a human clicks send.",
   "type": "module",
   "bin": {

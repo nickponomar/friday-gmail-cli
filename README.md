@@ -116,6 +116,9 @@ friday-gmail search personal 'from:amazon newer_than:7d'
 friday-gmail get personal 18c2a4b7d3e5f601
 friday-gmail attachment personal <msgId> <attachmentId> ./invoice.pdf
 
+friday-gmail drafts personal               # list unsent drafts
+friday-gmail draft-discard personal <draftId>   # delete an unsent draft
+
 friday-gmail archive personal <msgId>...   # out of inbox, labeled friday/archived
 friday-gmail trash personal <msgId>...     # to trash, labeled friday/trashed
 friday-gmail restore personal <msgId>...   # undo either of the above
