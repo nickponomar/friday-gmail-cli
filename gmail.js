@@ -29,8 +29,8 @@
 //   draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attachmentPath...]
 //                                 create an UNSENT draft; --reply <msgId> threads it
 //                                 into that message's conversation. The emailFile has
-//                                 To:/An: + Subject:/Betreff: header lines, a blank
-//                                 line, then the body. Drafts are ALWAYS built as
+//                                 To:/An: + Subject:/Betreff: (optional Cc:/Kopie:)
+//                                 header lines, a blank line, then the body. Drafts are ALWAYS built as
 //                                 multipart/alternative (text + HTML, newlines to
 //                                 <br>) so paragraph breaks survive editing in HTML
 //                                 mail clients. --sig appends an optional HTML signature.
@@ -437,13 +437,14 @@ async function cmdDraft(key, args) {
 
   const src = readFileSync(emailFile, "utf8");
   const lines = src.split(/\r?\n/);
-  let to = "", subject = "", i = 0;
+  let to = "", cc = "", subject = "", i = 0;
   for (; i < lines.length; i++) {
     if (lines[i].trim() === "") { i++; break; }
-    const m = lines[i].match(/^(To|An|Subject|Betreff):\s*(.*)$/i);
+    const m = lines[i].match(/^(To|An|Cc|Kopie|Subject|Betreff):\s*(.*)$/i);
     if (!m) break;
     const k = m[1].toLowerCase();
     if (k === "to" || k === "an") to = m[2].trim();
+    else if (k === "cc" || k === "kopie") cc = m[2].trim();
     else if (k === "subject" || k === "betreff") subject = m[2].trim();
   }
   if (!to) die("no To:/An: header found in email file");
@@ -515,7 +516,7 @@ async function cmdDraft(key, args) {
   }
 
   const top = Buffer.concat([
-    Buffer.from(`To: ${encodeAddressList(to)}${CRLF}From: ${account(key).email}${CRLF}Subject: ${encSubject}${CRLF}MIME-Version: 1.0${CRLF}${replyHeaders}${headers}${CRLF}`, "utf8"),
+    Buffer.from(`To: ${encodeAddressList(to)}${CRLF}${cc ? `Cc: ${encodeAddressList(cc)}${CRLF}` : ""}From: ${account(key).email}${CRLF}Subject: ${encSubject}${CRLF}MIME-Version: 1.0${CRLF}${replyHeaders}${headers}${CRLF}`, "utf8"),
     payload,
   ]);
   const message = { raw: b64url(top) };
@@ -523,7 +524,7 @@ async function cmdDraft(key, args) {
   const res = await api(key, "drafts", { method: "POST", body: JSON.stringify({ message }) });
   console.log(JSON.stringify({
     draftId: res.id,
-    to, subject,
+    to, cc: cc || undefined, subject,
     html: true,
     threadId,
     attachments: attachments.map((p) => p.split("/").pop()),
