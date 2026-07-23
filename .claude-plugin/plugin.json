@@ -1,0 +1,11 @@
+{
+  "name": "friday-gmail",
+  "description": "Skill for working a Gmail inbox with the friday-gmail CLI: read, search, label, and draft (never send) email from Claude Code.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Nick Ponomar",
+    "url": "https://github.com/nickponomar"
+  },
+  "homepage": "https://github.com/nickponomar/friday-gmail-cli",
+  "license": "MIT"
+}

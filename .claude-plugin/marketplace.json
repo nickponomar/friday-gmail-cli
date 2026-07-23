@@ -1,0 +1,15 @@
+{
+  "name": "friday-gmail-cli",
+  "description": "Skills for the friday-gmail CLI, the Gmail tool for AI agents that structurally cannot send email.",
+  "owner": {
+    "name": "Nick Ponomar",
+    "url": "https://github.com/nickponomar"
+  },
+  "plugins": [
+    {
+      "name": "friday-gmail",
+      "source": "./",
+      "description": "Skill for working a Gmail inbox with the friday-gmail CLI: read, search, label, and draft (never send) email from Claude Code."
+    }
+  ]
+}

@@ -153,6 +153,20 @@ friday-gmail draft personal reply.txt --reply 18c2a4b7d3e5f601 --sig sig.html in
 - The draft lands unsent in your Drafts folder; the JSON output includes a link
   that opens it.
 
+## Claude Code skill
+
+This repo doubles as a Claude Code plugin that teaches Claude how to drive the
+CLI correctly (draft file format, reply threading, triage etiquette, and the
+no-send guarantee). Install it with:
+
+```
+/plugin marketplace add nickponomar/friday-gmail-cli
+/plugin install friday-gmail@friday-gmail-cli
+```
+
+The skill itself is [`skills/friday-gmail/SKILL.md`](./skills/friday-gmail/SKILL.md);
+you can also copy or symlink that directory into `~/.claude/skills/` directly.
+
 ## Using with AI agents
 
 The JSON-lines output and the no-send guarantee make this a natural tool for
