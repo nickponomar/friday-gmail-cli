@@ -1,15 +1,18 @@
 name: Publish to npm
 
-# Publishes on every GitHub release via npm trusted publishing (OIDC):
-# no npm token is stored in this repo. One-time setup on npmjs.com:
-# package Settings -> Trusted Publisher -> GitHub Actions
-# (owner nickponomar, repo friday-gmail-cli, workflow publish.yml).
+# Every push to main: if package.json holds a version not yet on npm, publish
+# it (trusted publishing / OIDC, no token stored) and create the matching git
+# tag + GitHub release. Pushes without a version bump are a no-op, since npm
+# refuses to republish an existing version. Release flow: bump version, push.
+#
+# One-time setup on npmjs.com: package Settings -> Trusted Publisher ->
+# GitHub Actions (owner nickponomar, repo friday-gmail-cli, workflow publish.yml).
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -23,5 +26,27 @@ jobs:
           registry-url: https://registry.npmjs.org
       # Trusted publishing needs npm >= 11.5.1; the bundled one may be older.
       - run: npm install -g npm@latest
-      - run: node --check gmail.js
-      - run: npm publish
+      - name: Check whether this version is already on npm
+        id: check
+        run: |
+          V=$(node -p "require('./package.json').version")
+          if npm view "friday-gmail-cli@$V" version >/dev/null 2>&1; then
+            echo "friday-gmail-cli@$V is already on npm — nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "friday-gmail-cli@$V is new — publishing"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "version=$V" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.check.outputs.publish == 'true'
+        run: node --check gmail.js
+      - if: steps.check.outputs.publish == 'true'
+        run: npm publish
+      - name: Tag and create the GitHub release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.check.outputs.version }}" \
+            --title "v${{ steps.check.outputs.version }}" \
+            --generate-notes
