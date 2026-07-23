@@ -1,0 +1,27 @@
+name: Publish to npm
+
+# Publishes on every GitHub release via npm trusted publishing (OIDC):
+# no npm token is stored in this repo. One-time setup on npmjs.com:
+# package Settings -> Trusted Publisher -> GitHub Actions
+# (owner nickponomar, repo friday-gmail-cli, workflow publish.yml).
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1; the bundled one may be older.
+      - run: npm install -g npm@latest
+      - run: node --check gmail.js
+      - run: npm publish
