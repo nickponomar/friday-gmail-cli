@@ -1,0 +1,4 @@
+node_modules/
+friday-gmail.json
+*.log
+.DS_Store

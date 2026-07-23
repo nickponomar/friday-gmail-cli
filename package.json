@@ -1,0 +1,38 @@
+{
+  "name": "friday-gmail-cli",
+  "version": "0.1.0",
+  "description": "A zero-dependency Gmail CLI for AI agents that structurally cannot send email. It reads, labels, and drafts; a human clicks send.",
+  "type": "module",
+  "bin": {
+    "friday-gmail": "./gmail.js"
+  },
+  "files": [
+    "gmail.js",
+    "friday-gmail.example.json"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "gmail",
+    "cli",
+    "email",
+    "ai-agents",
+    "agent",
+    "draft",
+    "no-send",
+    "inbox",
+    "triage",
+    "claude"
+  ],
+  "author": "Nick Ponomar",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickponomar/friday-gmail-cli.git"
+  },
+  "homepage": "https://github.com/nickponomar/friday-gmail-cli#readme",
+  "bugs": {
+    "url": "https://github.com/nickponomar/friday-gmail-cli/issues"
+  }
+}

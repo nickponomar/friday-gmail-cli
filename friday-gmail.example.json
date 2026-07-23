@@ -1,0 +1,15 @@
+{
+  "accounts": {
+    "personal": {
+      "email": "you@gmail.com",
+      "tokenEnv": "GMAIL_REFRESH_TOKEN_PERSONAL"
+    },
+    "work": {
+      "email": "you@yourcompany.com",
+      "tokenEnv": "GMAIL_REFRESH_TOKEN_WORK"
+    }
+  },
+  "labelPrefix": "friday",
+  "stateDir": "~/.config/friday-gmail",
+  "redirectPort": 8479
+}
