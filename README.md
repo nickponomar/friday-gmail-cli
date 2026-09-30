@@ -31,11 +31,12 @@ it can do is mislabel something, and you can see and undo everything it did.
   when you configure just one)
 - Inbox listing and full Gmail query search, output as JSON lines built for agent
   and script consumption
-- Full message fetch (headers, text body, attachment metadata) and attachment
-  download
+- Full message fetch (headers, text body, attachment metadata, optionally the
+  raw HTML part) and attachment download
 - Rich draft creation: reply threading into an existing conversation, HTML
-  signatures, attachments, and multipart text + HTML bodies so paragraph breaks
-  survive editing in HTML mail clients
+  signatures, attachments, and multipart text + HTML bodies. Plain-text
+  paragraphs and `1.` / `-` lists become real HTML paragraphs and lists, so the
+  layout survives editing in HTML mail clients
 - Non-ASCII-safe headers (RFC 2047 encoding for names and subjects)
 - Deep links into Gmail web for every message, pinned to the right account
 - PKCE OAuth flow you complete in any browser, on any device
