@@ -33,7 +33,9 @@ never suggest adding one, and never present a created draft as "sent".
   labels, snippet, deep link.
 - `search [account] <gmail-query> [--max N]` — full Gmail query syntax
   (`from:x newer_than:7d has:attachment` etc.).
-- `get [account] <msgId>` — full headers + text body + attachment metadata.
+- `get [account] <msgId> [--html]` — full headers (incl. cc) + text body +
+  attachment metadata; `--html` adds the raw HTML part (e.g. to see how a
+  human reformatted a draft).
 - `attachment [account] <msgId> <attachmentId> <outPath>` — download.
 - `draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attach...]`
 - `drafts [account] [--max N]` / `draft-discard [account] <draftId>` — list or
@@ -46,9 +48,10 @@ never suggest adding one, and never present a created draft as "sent".
 
 1. The email file is: `To:` (+ optional `Cc:`) and `Subject:` header lines
    (German `An:`/`Kopie:`/`Betreff:` also accepted), one blank line, then a
-   PLAIN TEXT body. The tool builds multipart text+HTML itself and converts
-   newlines to `<br>`, so paragraph breaks survive HTML mail editors. Never put
-   HTML in the body.
+   PLAIN TEXT body. The tool builds multipart text+HTML itself: blank-line
+   paragraphs, `1.` / `2)` lines as a real numbered list and `-` / `*` lines as
+   a bullet list (indent a line to continue the previous item). Never put HTML
+   in the body; write lists as plain `1.` / `-` lines instead.
 2. For a reply, ALWAYS pass `--reply <msgId>` (find the id via `search`/`inbox`).
    It sets the thread id and In-Reply-To/References headers so the draft lands
    inside the existing conversation; without it Gmail starts a new thread. Keep
