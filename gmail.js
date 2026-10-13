@@ -33,7 +33,9 @@
 //                                 header lines, a blank line, then the body. Drafts are ALWAYS built as
 //                                 multipart/alternative (text + HTML, newlines to
 //                                 <br>) so paragraph breaks survive editing in HTML
-//                                 mail clients. --sig appends an optional HTML signature.
+//                                 mail clients. **bold** on one line renders bold in
+//                                 the HTML part (asterisks stripped in the text part).
+//                                 --sig appends an optional HTML signature.
 //   drafts [account] [--max N]    list unsent drafts (draft id, thread, to, subject)
 //   draft-discard [account] <draftId>  delete an UNSENT draft (sent mail is never
 //                                 deletable here; this only affects drafts)
@@ -472,6 +474,12 @@ async function cmdDraft(key, args) {
   const wrap = (b64) => b64.replace(/(.{76})/g, `$1${CRLF}`);
   const b64buf = (s) => Buffer.from(s, "utf8").toString("base64");
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  // The one bit of markup the body supports: **bold** on a single line. It becomes
+  // <b> in the HTML part and loses its asterisks in the text/plain part, so a
+  // text-only client shows a clean line instead of literal stars. Anything else
+  // in the body stays literal, exactly as before.
+  const BOLD = /\*\*([^*\n]+?)\*\*/g;
+  const plainBody = body.replace(BOLD, "$1");
   const mkBoundary = (p) => `==${p}_${b64url(randomBytes(9))}==`;
 
   // Build the body section: ALWAYS a multipart/alternative carrying a text/plain
@@ -482,10 +490,10 @@ async function cmdDraft(key, args) {
   const sig = sigFile ? readFileSync(sigFile, "utf8") : "";
   const htmlDoc =
     `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#333333;line-height:1.5;">` +
-    esc(body).replace(/\r?\n/g, "<br>\n") + (sig ? `<br><br>${sig}` : "") + `</body></html>`;
+    esc(body).replace(BOLD, "<b>$1</b>").replace(/\r?\n/g, "<br>\n") + (sig ? `<br><br>${sig}` : "") + `</body></html>`;
   const altB = mkBoundary("alt");
   const altBytes = Buffer.from(
-    `--${altB}${CRLF}Content-Type: text/plain; charset="UTF-8"${CRLF}Content-Transfer-Encoding: base64${CRLF}${CRLF}` + wrap(b64buf(body)) + CRLF +
+    `--${altB}${CRLF}Content-Type: text/plain; charset="UTF-8"${CRLF}Content-Transfer-Encoding: base64${CRLF}${CRLF}` + wrap(b64buf(plainBody)) + CRLF +
     `--${altB}${CRLF}Content-Type: text/html; charset="UTF-8"${CRLF}Content-Transfer-Encoding: base64${CRLF}${CRLF}` + wrap(b64buf(htmlDoc)) + CRLF +
     `--${altB}--${CRLF}`, "utf8");
   const bodySection = { ct: `multipart/alternative; boundary="${altB}"`, bytes: altBytes, multipart: true };

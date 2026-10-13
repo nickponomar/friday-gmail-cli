@@ -48,7 +48,9 @@ never suggest adding one, and never present a created draft as "sent".
    (German `An:`/`Kopie:`/`Betreff:` also accepted), one blank line, then a
    PLAIN TEXT body. The tool builds multipart text+HTML itself and converts
    newlines to `<br>`, so paragraph breaks survive HTML mail editors. Never put
-   HTML in the body.
+   HTML in the body. The one supported markup is `**bold**` within a single
+   line (e.g. a section heading): it renders bold in the HTML part and the
+   asterisks are stripped from the plain-text part.
 2. For a reply, ALWAYS pass `--reply <msgId>` (find the id via `search`/`inbox`).
    It sets the thread id and In-Reply-To/References headers so the draft lands
    inside the existing conversation; without it Gmail starts a new thread. Keep
