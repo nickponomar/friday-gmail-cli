@@ -30,7 +30,8 @@ so a release is never a side effect of merging a feature.
    which reports that the current version is already on npm.
 2. On a branch from the new `main`, check that README and
    `skills/friday-gmail/SKILL.md` describe everything that landed, then run
-   `node --check gmail.js`.
+   `node --check gmail.js` and `npm test` (offline: the tests run the real CLI
+   against canned API responses; CI runs them on every PR and push to `main`).
 3. Smoke test the merged code against a real mailbox. Reading and drafting
    only: never `archive`, `trash` or `label` while testing, and discard every
    test draft. Replace `<acct>` and `<msgId>`; pick a `<msgId>` with a Cc.

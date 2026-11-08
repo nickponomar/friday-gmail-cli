@@ -126,7 +126,14 @@ friday-gmail archive personal <msgId>...   # out of inbox, labeled friday/archiv
 friday-gmail trash personal <msgId>...     # to trash, labeled friday/trashed
 friday-gmail restore personal <msgId>...   # undo either of the above
 friday-gmail label personal "receipts/2026" <msgId>...
+friday-gmail unlabel personal "receipts/2026" <msgId>...
 ```
+
+`unlabel` is the mirror of `label`: it removes the label from each message and
+never creates it. If no label by that name exists (matched regardless of case)
+it prints `unlabeled 0: no label "..." in <account>` and exits 0. It sends the
+ids in batches of up to 1000 (one `messages.batchModify` call each), so passing
+hundreds of ids costs a few requests, and it works on messages in Trash.
 
 ### Drafting
 
@@ -208,7 +215,12 @@ drafts wait in Drafts, and every archive/trash carries an undoable label.
 - **State on disk is minimal**: only the PKCE verifier between the two auth
   steps, in `stateDir`. Tokens stay in environment variables.
 - **Errors are loud and final.** Any API failure prints the status and body and
-  exits non-zero, which is what you want under an agent harness.
+  exits non-zero, which is what you want under an agent harness. The one
+  exception is rate limiting (HTTP 429, or 403 `rateLimitExceeded` /
+  `userRateLimitExceeded`), which large searches hit because each result costs
+  a request: those are retried with backoff (1s, 2s, 4s, ... up to 60s, about
+  two minutes in total, longer if Gmail sends `Retry-After`), with a note on
+  stderr for each retry, before the command fails.
 
 ## Contributing and releases
 

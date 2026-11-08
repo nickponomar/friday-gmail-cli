@@ -31,6 +31,8 @@ jobs:
           node-version: 22
       - name: Syntax check
         run: node --check gmail.js
+      - name: Tests (offline, canned Gmail API responses)
+        run: npm test
       - name: package.json and plugin.json versions match
         run: |
           P=$(node -p "require('./package.json').version")
