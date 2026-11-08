@@ -20,6 +20,7 @@
 //   auth-exchange <redirect-url>  exchange the pasted redirect URL/code for a
 //                                 refresh token; prints which mailbox it belongs to
 // Commands ([account] is optional when the config defines exactly one account):
+//   --version                     print the installed version (no config needed)
 //   accounts                      list account keys and which have tokens
 //   count                         inbox message/thread/unread counts per account
 //   inbox [account] [--max N]     inbox messages as JSON lines (metadata incl. cc/reply_to + snippet)
@@ -108,6 +109,12 @@ function loadConfig(argv) {
 }
 
 const argv = process.argv.slice(2);
+// --version needs no config or credentials: it reads the package.json shipped
+// next to this file (the npm package always includes it).
+if (argv[0] === "--version" || argv[0] === "-v") {
+  console.log(JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version);
+  process.exit(0);
+}
 const CONFIG = loadConfig(argv);
 const ACCOUNTS = CONFIG.accounts;
 const LABEL_PREFIX = CONFIG.labelPrefix;

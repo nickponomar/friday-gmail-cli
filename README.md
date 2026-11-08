@@ -110,6 +110,7 @@ The `[account]` argument is the account key from your config. Omit it if you
 configured exactly one account.
 
 ```sh
+friday-gmail --version                     # installed version (no config needed)
 friday-gmail accounts                      # list accounts and token status
 friday-gmail count                         # inbox/thread/unread counts
 friday-gmail inbox personal --max 20       # inbox as JSON lines
@@ -208,6 +209,13 @@ drafts wait in Drafts, and every archive/trash carries an undoable label.
   steps, in `stateDir`. Tokens stay in environment variables.
 - **Errors are loud and final.** Any API failure prints the status and body and
   exits non-zero, which is what you want under an agent harness.
+
+## Contributing and releases
+
+Every push to `main` whose `package.json` version is not on npm yet publishes
+that version and creates the matching GitHub release. So feature PRs leave the
+version alone, and a release is one version bump pushed to `main`. The steps
+are in [RELEASING.md](./RELEASING.md).
 
 ## License
 

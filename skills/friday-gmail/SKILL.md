@@ -27,6 +27,7 @@ never suggest adding one, and never present a created draft as "sent".
 
 ## Commands
 
+- `--version`: the installed version (needs no config).
 - `accounts` — account keys + token status. Run this first when unsure.
 - `count` — inbox/thread/unread counts per account.
 - `inbox [account] [--max N]` — JSON lines: id, threadId, from, subject, date,
