@@ -1,9 +1,23 @@
 name: Check
 
-# Runs on every PR. Releases happen only by pushing a version bump to main (see
-# RELEASING.md), so a PR must not change the version: merging it would publish.
+# Runs on every PR and on every push to main. Releases happen only by pushing a
+# version bump to main (see RELEASING.md), so a PR must not change the version:
+# merging it would publish. The secret scan also runs on pushes to main, since
+# release commits go there directly.
 on:
   pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  # gitleaks (MIT) is downloaded from its GitHub release and checked against
+  # this SHA-256 before it runs. To upgrade, take both values from the release's
+  # gitleaks_<version>_checksums.txt (linux_x64 line).
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
 jobs:
   check:
@@ -26,6 +40,7 @@ jobs:
             exit 1
           fi
       - name: PR leaves the version alone
+        if: github.event_name == 'pull_request'
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -35,3 +50,12 @@ jobs:
             echo "::error::This PR changes the version ($OLD -> $NEW). Merging it would publish to npm. Leave the version alone; releases are a separate version bump on main (RELEASING.md)."
             exit 1
           fi
+      - name: Secret scan (gitleaks, full history)
+        run: |
+          F="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$F" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$F"
+          echo "$GITLEAKS_SHA256  $RUNNER_TEMP/$F" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$F" -C "$RUNNER_TEMP" gitleaks
+          # Scans every commit reachable from this checkout. --redact keeps any
+          # finding's value out of the (public) log.
+          "$RUNNER_TEMP/gitleaks" git --redact --verbose --exit-code 1 .
