@@ -33,7 +33,8 @@ never suggest adding one, and never present a created draft as "sent".
   labels, snippet, deep link.
 - `search [account] <gmail-query> [--max N]` — full Gmail query syntax
   (`from:x newer_than:7d has:attachment` etc.).
-- `get [account] <msgId>` — full headers + text body + attachment metadata.
+- `get [account] <msgId>` — from/to/cc/reply_to + text body + attachment metadata.
+  `inbox` and `search` lines carry `cc` and `reply_to` too.
 - `attachment [account] <msgId> <attachmentId> <outPath>` — download.
 - `draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attach...]`
 - `drafts [account] [--max N]` / `draft-discard [account] <draftId>` — list or
@@ -54,7 +55,11 @@ never suggest adding one, and never present a created draft as "sent".
 2. For a reply, ALWAYS pass `--reply <msgId>` (find the id via `search`/`inbox`).
    It sets the thread id and In-Reply-To/References headers so the draft lands
    inside the existing conversation; without it Gmail starts a new thread. Keep
-   the `Re: <original subject>` subject and set `To:` yourself.
+   the `Re: <original subject>` subject and set `To:` yourself. Check the
+   original's `cc` (from `get`/`search`) and carry it over as `Cc:` unless the
+   user wants a narrower reply. If the draft output has `not_included`, those
+   addresses were on the original but are missing from your draft: add them and
+   redraft, or tell the user you left them out on purpose.
 3. `--sig <htmlFile>` appends an HTML signature after the body.
 4. Report back the draftId and the `#drafts` deep link from the JSON output, and
    state clearly that the draft is unsent and awaiting review. To remove a bad
