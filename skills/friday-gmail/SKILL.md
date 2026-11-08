@@ -33,9 +33,10 @@ never suggest adding one, and never present a created draft as "sent".
   labels, snippet, deep link.
 - `search [account] <gmail-query> [--max N]` — full Gmail query syntax
   (`from:x newer_than:7d has:attachment` etc.).
-- `get [account] <msgId> [--html]` — full headers (incl. cc) + text body +
+- `get [account] <msgId> [--html]`: from/to/cc/reply_to + text body +
   attachment metadata; `--html` adds the raw HTML part (e.g. to see how a
-  human reformatted a draft).
+  human reformatted a draft). `inbox` and `search` lines carry `cc` and
+  `reply_to` too.
 - `attachment [account] <msgId> <attachmentId> <outPath>` — download.
 - `draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attach...]`
 - `drafts [account] [--max N]` / `draft-discard [account] <draftId>` — list or
@@ -50,12 +51,21 @@ never suggest adding one, and never present a created draft as "sent".
    (German `An:`/`Kopie:`/`Betreff:` also accepted), one blank line, then a
    PLAIN TEXT body. The tool builds multipart text+HTML itself: blank-line
    paragraphs, `1.` / `2)` lines as a real numbered list and `-` / `*` lines as
-   a bullet list (indent a line to continue the previous item). Never put HTML
-   in the body; write lists as plain `1.` / `-` lines instead.
+   a bullet list (indent a line to continue the previous item; a blank line
+   between items is fine). A single `1.` or `-` line stays plain text. Never
+   put HTML in the body; write lists as plain `1.` / `-` lines instead. The
+   one inline markup is `**bold**` within a single line (e.g. a section
+   heading or a list item's lead-in): bold in the HTML part, asterisks
+   stripped from the plain-text part.
 2. For a reply, ALWAYS pass `--reply <msgId>` (find the id via `search`/`inbox`).
    It sets the thread id and In-Reply-To/References headers so the draft lands
    inside the existing conversation; without it Gmail starts a new thread. Keep
-   the `Re: <original subject>` subject and set `To:` yourself.
+   the `Re: <original subject>` subject and set `To:` yourself. Check the
+   original's `cc` (from `get`/`search`) and carry it over as `Cc:` unless the
+   user wants a narrower reply. If the draft output has `not_included`, those
+   addresses were on the original but are missing from your draft: add them and
+   redraft, or tell the user you left them out on purpose. Forwards (subject
+   `Fwd:`/`Fw:`/`WG:`) are not checked, and your own addresses never show up.
 3. `--sig <htmlFile>` appends an HTML signature after the body.
 4. Report back the draftId and the `#drafts` deep link from the JSON output, and
    state clearly that the draft is unsent and awaiting review. To remove a bad

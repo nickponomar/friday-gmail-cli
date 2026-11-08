@@ -114,7 +114,8 @@ friday-gmail accounts                      # list accounts and token status
 friday-gmail count                         # inbox/thread/unread counts
 friday-gmail inbox personal --max 20       # inbox as JSON lines
 friday-gmail search personal 'from:amazon newer_than:7d'
-friday-gmail get personal 18c2a4b7d3e5f601
+friday-gmail get personal 18c2a4b7d3e5f601     # incl. cc and reply_to
+friday-gmail get personal 18c2a4b7d3e5f601 --html  # plus the raw HTML part
 friday-gmail attachment personal <msgId> <attachmentId> ./invoice.pdf
 
 friday-gmail drafts personal               # list unsent drafts
@@ -148,8 +149,22 @@ friday-gmail draft personal reply.txt --reply 18c2a4b7d3e5f601 --sig sig.html in
 ```
 
 - `--reply <msgId>` threads the draft into that message's conversation
-  (correct `In-Reply-To`/`References` headers and Gmail thread id).
+  (correct `In-Reply-To`/`References` headers and Gmail thread id). It does not
+  copy recipients: set `To:` and `Cc:` yourself. Anyone on the original message
+  (sender or Reply-To, To, Cc) who is missing from the draft is listed in the
+  output as `not_included` and printed as a warning on stderr, so a dropped Cc
+  is never silent. Your own address and its send-as aliases are never listed,
+  and a forward (subject starting with `Fwd:`, `Fw:` or `WG:`) skips the check.
 - `--sig <htmlFile>` appends an HTML signature.
+- The body is plain text; the draft is built as text plus HTML:
+  - Blank lines separate paragraphs.
+  - Lines starting `1.` / `2)` become a numbered list and lines starting `-`,
+    `*` or `•` a bullet list. Indent a line to continue the previous item; a
+    blank line between items does not end the list. A single such line (e.g.
+    `1. Oktober passt` or a `- Name` sign-off) stays plain text.
+  - `**bold**` within one line renders bold in the HTML part, and its asterisks
+    are stripped from the plain-text part.
+  - Anything else is literal (HTML in the body is escaped, not rendered).
 - Remaining arguments are attachment paths.
 - The draft lands unsent in your Drafts folder; the JSON output includes a link
   that opens it.
