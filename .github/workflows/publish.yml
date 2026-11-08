@@ -41,6 +41,14 @@ jobs:
           fi
       - if: steps.check.outputs.publish == 'true'
         run: node --check gmail.js
+      - name: plugin.json version matches package.json
+        if: steps.check.outputs.publish == 'true'
+        run: |
+          G=$(node -p "require('./.claude-plugin/plugin.json').version")
+          if [ "$G" != "${{ steps.check.outputs.version }}" ]; then
+            echo "::error::.claude-plugin/plugin.json is $G, package.json is ${{ steps.check.outputs.version }}"
+            exit 1
+          fi
       - if: steps.check.outputs.publish == 'true'
         run: npm publish
       - name: Tag and create the GitHub release
