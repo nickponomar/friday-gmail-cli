@@ -59,7 +59,8 @@ never suggest adding one, and never present a created draft as "sent".
    original's `cc` (from `get`/`search`) and carry it over as `Cc:` unless the
    user wants a narrower reply. If the draft output has `not_included`, those
    addresses were on the original but are missing from your draft: add them and
-   redraft, or tell the user you left them out on purpose.
+   redraft, or tell the user you left them out on purpose. Forwards (subject
+   `Fwd:`/`Fw:`/`WG:`) are not checked, and your own addresses never show up.
 3. `--sig <htmlFile>` appends an HTML signature after the body.
 4. Report back the draftId and the `#drafts` deep link from the JSON output, and
    state clearly that the draft is unsent and awaiting review. To remove a bad

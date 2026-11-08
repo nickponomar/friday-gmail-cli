@@ -151,7 +151,8 @@ friday-gmail draft personal reply.txt --reply 18c2a4b7d3e5f601 --sig sig.html in
   copy recipients: set `To:` and `Cc:` yourself. Anyone on the original message
   (sender or Reply-To, To, Cc) who is missing from the draft is listed in the
   output as `not_included` and printed as a warning on stderr, so a dropped Cc
-  is never silent.
+  is never silent. Your own address and its send-as aliases are never listed,
+  and a forward (subject starting with `Fwd:`, `Fw:` or `WG:`) skips the check.
 - `--sig <htmlFile>` appends an HTML signature.
 - The body is plain text; the draft is built as text plus HTML. `**bold**` within
   one line renders bold in the HTML part, and its asterisks are stripped from the
