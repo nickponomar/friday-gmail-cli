@@ -24,7 +24,8 @@
 //   count                         inbox message/thread/unread counts per account
 //   inbox [account] [--max N]     inbox messages as JSON lines (metadata incl. cc/reply_to + snippet)
 //   search [account] <q> [--max N]  all-mail search (Gmail query syntax) as JSON lines
-//   get [account] <msgId>         full message: from/to/cc/reply_to, text body, attachments
+//   get [account] <msgId> [--html]  full message: from/to/cc/reply_to, text body,
+//                                 attachments; --html adds the raw HTML part
 //   attachment [account] <msgId> <attachmentId> <outPath>
 //   draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attachmentPath...]
 //                                 create an UNSENT draft; --reply <msgId> threads it
@@ -34,11 +35,11 @@
 //                                 Fwd:/Fw:/WG: subjects; own addresses excluded). The emailFile has
 //                                 To:/An: + Subject:/Betreff: (optional Cc:/Kopie:)
 //                                 header lines, a blank line, then the body. Drafts are ALWAYS built as
-//                                 multipart/alternative (text + HTML, newlines to
-//                                 <br>) so paragraph breaks survive editing in HTML
-//                                 mail clients. **bold** on one line renders bold in
-//                                 the HTML part (asterisks stripped in the text part).
-//                                 --sig appends an optional HTML signature.
+//                                 multipart/alternative (text + HTML; paragraphs and
+//                                 "1." / "-" lines become real HTML lists) so the layout
+//                                 survives editing in HTML mail clients. **bold** on one
+//                                 line renders bold in the HTML part (asterisks stripped
+//                                 in the text part). --sig appends an optional HTML signature.
 //   drafts [account] [--max N]    list unsent drafts (draft id, thread, to, subject)
 //   draft-discard [account] <draftId>  delete an UNSENT draft (sent mail is never
 //                                 deletable here; this only affects drafts)
@@ -427,7 +428,81 @@ function walkParts(payload, out) {
   for (const p of parts ?? []) walkParts(p, out);
 }
 
-async function cmdGet(key, msgId) {
+// The one inline markup a draft body supports: **bold** within a single line.
+// <b> in the HTML part; the text/plain part keeps the words without asterisks.
+const BOLD = /\*\*([^*\n]+?)\*\*/g;
+
+// Plain-text draft body -> HTML the way a mail editor (Spark, Gmail) structures it:
+// text runs in a <div> with <br> line breaks, "1." / "2)" lines as a real <ol>,
+// "-" / "*" / "•" lines as a <ul> (indented lines continue the previous item), and
+// a blank line after a list as a spacer <div>. Real lists give the hanging indent
+// that wrapped numbered lines need; "1." as plain text wraps back to the margin.
+// A blank line between two items of the same list does not end it (numbered
+// items must continue the count). **bold** (see BOLD) works on every line.
+function bodyToHtml(body) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const fmt = (s) => esc(s).replace(BOLD, "<b>$1</b>");
+  const OL = /^\s*(\d+)[.)]\s+(.*)$/, UL = /^\s*[-*•]\s+(.*)$/;
+  // Pass 1: group lines into text, list and blank blocks.
+  const blocks = [];
+  for (const raw of body.replace(/\r\n/g, "\n").split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    let last = blocks[blocks.length - 1];
+    const ol = line.match(OL), ul = !ol && line.match(UL);
+    if (ol || ul) {
+      const type = ol ? "ol" : "ul";
+      // "1. a" + blank + "2. b": drop the blank and keep the list going.
+      const prev = blocks[blocks.length - 2];
+      if (last?.type === "blank" && prev?.type === type &&
+          (type === "ul" || Number(ol[1]) === prev.start + prev.items.length)) {
+        blocks.pop();
+        last = prev;
+      }
+      if (last?.type !== type) blocks.push({ type, start: ol ? Number(ol[1]) : 1, items: [], raw: [] });
+      const list = blocks[blocks.length - 1];
+      list.items.push([ol ? ol[2] : ul[1]]);
+      list.raw.push(line.trim());
+    } else if (line !== "" && /^\s/.test(raw) && (last?.type === "ol" || last?.type === "ul")) {
+      last.items[last.items.length - 1].push(line.trim()); // indented continuation
+      last.raw.push(line.trim());
+    } else if (line === "") {
+      blocks.push({ type: "blank" });
+    } else if (last?.type === "text") {
+      last.lines.push(line.trim());
+    } else {
+      blocks.push({ type: "text", lines: [line.trim()] });
+    }
+  }
+  // A lone "1. Oktober passt uns" is a sentence, not a list, and a lone "- Nick"
+  // is a sign-off: a single-item list of either kind stays text.
+  for (const [i, b] of blocks.entries()) {
+    if ((b.type === "ol" || b.type === "ul") && b.items.length === 1) blocks[i] = { type: "text", lines: b.raw };
+  }
+  // Pass 2: emit. Blank-line breaks inside a text run become a double <br>, like Spark.
+  const out = [];
+  let run = [], blank = false, afterList = false;
+  const flush = () => { if (run.length) out.push(`<div>${run.map(fmt).join("<br>\n")}</div>`); run = []; };
+  for (const b of blocks) {
+    if (b.type === "blank") { blank = true; continue; }
+    if (b.type === "text") {
+      if (run.length && blank) run.push("");
+      else if (!run.length && afterList && blank) out.push("<div>&#160;</div>");
+      run.push(...b.lines);
+      afterList = false;
+    } else {
+      flush();
+      const start = b.type === "ol" && b.start !== 1 ? ` start="${b.start}"` : "";
+      out.push(`<${b.type}${b.type === "ol" ? ' type="1"' : ""}${start}>\n` +
+        b.items.map((it) => `<li>${it.map(fmt).join("<br>\n")}</li>`).join("\n") + `\n</${b.type}>`);
+      afterList = true;
+    }
+    blank = false;
+  }
+  flush();
+  return out.join("\n");
+}
+
+async function cmdGet(key, msgId, withHtml) {
   const m = await api(key, `messages/${msgId}?format=full`);
   const out = { text: "", html: "", attachments: [] };
   walkParts(m.payload, out);
@@ -445,6 +520,8 @@ async function cmdGet(key, msgId) {
       date: header(m, "Date"),
       labels: m.labelIds ?? [],
       body: body.slice(0, 20_000),
+      // --html: the raw HTML part too, e.g. to see how a human reformatted a draft.
+      html: withHtml ? out.html.slice(0, 100_000) : undefined,
       attachments: out.attachments,
     })
   );
@@ -526,24 +603,20 @@ async function cmdDraft(key, args) {
     : subject;
   const wrap = (b64) => b64.replace(/(.{76})/g, `$1${CRLF}`);
   const b64buf = (s) => Buffer.from(s, "utf8").toString("base64");
-  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  // The one bit of markup the body supports: **bold** on a single line. It becomes
-  // <b> in the HTML part and loses its asterisks in the text/plain part, so a
-  // text-only client shows a clean line instead of literal stars. Anything else
-  // in the body stays literal, exactly as before.
-  const BOLD = /\*\*([^*\n]+?)\*\*/g;
+  // **bold** (see BOLD) loses its asterisks in the text/plain part, so a
+  // text-only client shows a clean line instead of literal stars.
   const plainBody = body.replace(BOLD, "$1");
   const mkBoundary = (p) => `==${p}_${b64url(randomBytes(9))}==`;
 
   // Build the body section: ALWAYS a multipart/alternative carrying a text/plain
-  // fallback plus a text/html version, with \n -> <br> so paragraph breaks survive
-  // when the draft is opened in an HTML mail editor. (A plain-text-only draft has
-  // its bare newlines collapsed into one run-on block by some editors, so we
-  // never emit that form.) --sig, if given, appends an optional HTML signature.
+  // fallback plus a text/html version (see bodyToHtml: paragraphs and real lists),
+  // so the layout survives when the draft is opened in an HTML mail editor. (A
+  // plain-text-only draft has its bare newlines collapsed into one run-on block by
+  // some editors, so we never emit that form.) --sig appends an optional HTML signature.
   const sig = sigFile ? readFileSync(sigFile, "utf8") : "";
   const htmlDoc =
     `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#333333;line-height:1.5;">` +
-    esc(body).replace(BOLD, "<b>$1</b>").replace(/\r?\n/g, "<br>\n") + (sig ? `<br><br>${sig}` : "") + `</body></html>`;
+    bodyToHtml(body) + (sig ? `<br>${sig}` : "") + `</body></html>`;
   const altB = mkBoundary("alt");
   const altBytes = Buffer.from(
     `--${altB}${CRLF}Content-Type: text/plain; charset="UTF-8"${CRLF}Content-Transfer-Encoding: base64${CRLF}${CRLF}` + wrap(b64buf(plainBody)) + CRLF +
@@ -617,8 +690,10 @@ else if (cmd === "inbox") {
   const [key, rest] = takeAccount(args, "search [account] <gmail-query> [--max N]");
   await cmdSearch(key, rest);
 } else if (cmd === "get") {
-  const [key, rest] = takeAccount(args, "get [account] <msgId>");
-  await cmdGet(key, rest[0] ?? die("usage: get [account] <msgId>"));
+  const [key, rest] = takeAccount(args, "get [account] <msgId> [--html]");
+  const withHtml = rest.includes("--html");
+  const ids = rest.filter((a) => a !== "--html");
+  await cmdGet(key, ids[0] ?? die("usage: get [account] <msgId> [--html]"), withHtml);
 } else if (cmd === "attachment") {
   const [key, rest] = takeAccount(args, "attachment [account] <msgId> <attachmentId> <outPath>");
   await cmdAttachment(key, rest[0], rest[1], rest[2]);
