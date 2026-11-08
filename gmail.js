@@ -22,13 +22,16 @@
 // Commands ([account] is optional when the config defines exactly one account):
 //   accounts                      list account keys and which have tokens
 //   count                         inbox message/thread/unread counts per account
-//   inbox [account] [--max N]     inbox messages as JSON lines (metadata + snippet)
+//   inbox [account] [--max N]     inbox messages as JSON lines (metadata incl. cc/reply_to + snippet)
 //   search [account] <q> [--max N]  all-mail search (Gmail query syntax) as JSON lines
-//   get [account] <msgId>         full message: headers, text body, attachments
+//   get [account] <msgId>         full message: from/to/cc/reply_to, text body, attachments
 //   attachment [account] <msgId> <attachmentId> <outPath>
 //   draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attachmentPath...]
 //                                 create an UNSENT draft; --reply <msgId> threads it
-//                                 into that message's conversation. The emailFile has
+//                                 into that message's conversation and reports anyone on
+//                                 the original (From/Reply-To, To, Cc) missing from the
+//                                 draft as "not_included" plus a stderr warning (not for
+//                                 Fwd:/Fw:/WG: subjects; own addresses excluded). The emailFile has
 //                                 To:/An: + Subject:/Betreff: (optional Cc:/Kopie:)
 //                                 header lines, a blank line, then the body. Drafts are ALWAYS built as
 //                                 multipart/alternative (text + HTML, newlines to
@@ -168,6 +171,32 @@ function splitAddresses(list) {
   }
   if (cur.trim()) out.push(cur);
   return out;
+}
+
+// Lower-cased bare addr-specs from an address list header ("A <a@x>, b@y").
+function addrSpecs(list) {
+  return splitAddresses(list || "")
+    .map((a) => (a.match(/<([^>]*)>/)?.[1] ?? a).trim().toLowerCase())
+    .filter((a) => a.includes("@"));
+}
+
+// A forward's subject (English Fwd:/Fw:, German WG:).
+const FORWARD_SUBJECT = /^\s*(fwd?|wg)\s*:/i;
+
+// This mailbox's own addresses: the account address plus its Gmail send-as
+// aliases, lower-cased. Falls back to the account address alone if the alias
+// list cannot be read, so drafting never fails on it.
+async function ownAddresses(key) {
+  const own = new Set([account(key).email.toLowerCase()]);
+  try {
+    // Not via api(): that exits on an HTTP error, and this lookup is best effort.
+    const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs", {
+      headers: { authorization: `Bearer ${await accessToken(key)}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (res.ok) for (const s of (await res.json()).sendAs ?? []) if (s.sendAsEmail) own.add(s.sendAsEmail.toLowerCase());
+  } catch {}
+  return own;
 }
 
 // Encode the display-name part of each address as RFC 2047, leaving the
@@ -325,7 +354,7 @@ async function cmdInbox(key, args) {
     if (pageToken) q.set("pageToken", pageToken);
     const page = await api(key, `messages?${q}`);
     for (const { id } of page.messages ?? []) {
-      const m = await api(key, `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=Message-ID`);
+      const m = await api(key, `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=Message-ID`);
       // Deep link that opens the right account and exact message in Gmail web/app.
       const mid = header(m, "Message-ID").replace(/^<|>$/g, "");
       console.log(
@@ -334,6 +363,8 @@ async function cmdInbox(key, args) {
           threadId: m.threadId,
           from: header(m, "From"),
           to: header(m, "To"),
+          cc: header(m, "Cc"),
+          reply_to: header(m, "Reply-To"),
           subject: header(m, "Subject"),
           date: header(m, "Date"),
           list_unsubscribe: header(m, "List-Unsubscribe") ? true : false,
@@ -360,7 +391,7 @@ async function cmdSearch(key, args) {
     if (pageToken) params.set("pageToken", pageToken);
     const page = await api(key, `messages?${params}`);
     for (const { id } of page.messages ?? []) {
-      const m = await api(key, `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID`);
+      const m = await api(key, `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID`);
       const mid = header(m, "Message-ID").replace(/^<|>$/g, "");
       console.log(
         JSON.stringify({
@@ -368,6 +399,8 @@ async function cmdSearch(key, args) {
           threadId: m.threadId,
           from: header(m, "From"),
           to: header(m, "To"),
+          cc: header(m, "Cc"),
+          reply_to: header(m, "Reply-To"),
           subject: header(m, "Subject"),
           date: header(m, "Date"),
           labels: m.labelIds ?? [],
@@ -406,6 +439,8 @@ async function cmdGet(key, msgId) {
       threadId: m.threadId,
       from: header(m, "From"),
       to: header(m, "To"),
+      cc: header(m, "Cc"),
+      reply_to: header(m, "Reply-To"),
       subject: header(m, "Subject"),
       date: header(m, "Date"),
       labels: m.labelIds ?? [],
@@ -457,8 +492,9 @@ async function cmdDraft(key, args) {
   // stitches the draft into the existing conversation instead of starting a new one.
   let threadId = null;
   let replyHeaders = "";
+  let notIncluded = [];
   if (replyMsgId) {
-    const rm = await api(key, `messages/${replyMsgId}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References`);
+    const rm = await api(key, `messages/${replyMsgId}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References&metadataHeaders=From&metadataHeaders=Reply-To&metadataHeaders=To&metadataHeaders=Cc`);
     threadId = rm.threadId;
     const mid = header(rm, "Message-ID");
     const refs = header(rm, "References");
@@ -466,6 +502,23 @@ async function cmdDraft(key, args) {
       replyHeaders =
         `In-Reply-To: ${mid}${CRLF}` +
         `References: ${(refs ? refs + " " : "") + mid}${CRLF}`;
+    }
+    // Everyone on the original (reply target + To + Cc), minus this mailbox, who is
+    // not on the draft. Not added automatically (reply vs reply-all is a human call),
+    // but reported so a dropped Cc never goes unnoticed. Skipped for a forward
+    // (Fwd:/Fw:/WG: subject): leaving the original recipients off is its purpose.
+    if (!FORWARD_SUBJECT.test(subject)) {
+      const own = await ownAddresses(key);
+      const isOwn = (a) => own.has(a) || own.has(a.replace(/\+[^@]*@/, "@"));
+      const onDraft = new Set([...addrSpecs(to), ...addrSpecs(cc)]);
+      const original = [
+        ...addrSpecs(header(rm, "Reply-To") || header(rm, "From")),
+        ...addrSpecs(header(rm, "To")),
+        ...addrSpecs(header(rm, "Cc")),
+      ];
+      notIncluded = [...new Set(original)].filter((a) => !isOwn(a) && !onDraft.has(a));
+      if (notIncluded.length)
+        console.error(`friday-gmail: warning: on the original message but not on this draft: ${notIncluded.join(", ")}`);
     }
   }
   const encSubject = /[^\x00-\x7F]/.test(subject)
@@ -535,6 +588,7 @@ async function cmdDraft(key, args) {
     to, cc: cc || undefined, subject,
     html: true,
     threadId,
+    not_included: notIncluded.length ? notIncluded : undefined,
     attachments: attachments.map((p) => p.split("/").pop()),
     open: `https://mail.google.com/mail/?authuser=${account(key).email}#drafts`,
   }));
