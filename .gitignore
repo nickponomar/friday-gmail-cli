@@ -2,3 +2,6 @@ node_modules/
 friday-gmail.json
 *.log
 .DS_Store
+# Claude Code: agent worktrees and personal settings live inside the repo folder
+.claude/worktrees/
+.claude/settings.local.json

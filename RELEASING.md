@@ -20,7 +20,9 @@ so a release is never a side effect of merging a feature.
   or flag, or a change in how drafts are built that callers would notice, is a
   minor bump and gets called out in the release notes.
 - The repo is public: no real names, addresses or mail content in commits, PR
-  text or fixtures. Use `example.com`.
+  text or fixtures. Use `example.com`. The `check` workflow runs gitleaks over
+  the whole history on every PR and push to `main` and fails on any finding;
+  it cannot see PR descriptions or comments, so check those yourself.
 
 ## Steps
 
