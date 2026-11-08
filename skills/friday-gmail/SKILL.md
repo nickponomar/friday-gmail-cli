@@ -44,6 +44,13 @@ never suggest adding one, and never present a created draft as "sent".
   delete UNSENT drafts.
 - `archive` / `trash` / `restore` / `label` — triage verbs; archive and trash
   tag messages under the configured label prefix and `restore` undoes both.
+- `unlabel [account] <name> <msgId...>`: removes a label (the mirror of
+  `label`). Never creates it: a missing label prints `unlabeled 0: no label
+  ...` and exits 0. Pass all the ids in one call; it batches up to 1000 per
+  request and works on messages in Trash.
+- Rate limits (429 / 403 `rateLimitExceeded`) are retried with backoff for
+  about two minutes, with a `rate limited ... retry n/7` note on stderr; only
+  then does the command fail. Other API errors fail immediately.
 - The `[account]` key is optional when the config defines exactly one account.
 
 ## Drafting correctly
@@ -74,7 +81,7 @@ never suggest adding one, and never present a created draft as "sent".
 
 ## Triage etiquette
 
-- Reading is always safe. `archive`/`trash`/`label` modify the user's mailbox:
+- Reading is always safe. `archive`/`trash`/`label`/`unlabel` modify the user's mailbox:
   do them when the user asked for triage, and summarize what was moved with
   message ids so any action can be undone with `restore <msgId...>`.
 - Trash is Gmail's trash (recoverable ~30 days); the tool's `gmail.modify`

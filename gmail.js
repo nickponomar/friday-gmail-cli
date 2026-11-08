@@ -48,6 +48,11 @@
 //   trash [account] <msgId...>    add <prefix>/trashed, move to Trash
 //   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/*
 //   label [account] <name> <msgId...>  add a label (created if missing)
+//   unlabel [account] <name> <msgId...>  remove a label (never created; a missing
+//                                 label is a clean no-op). Batched, works in Trash.
+//
+// A request rejected for rate limiting (429, or 403 rateLimitExceeded) is
+// retried with backoff for about two minutes before the command fails.
 //
 // Env:
 //   GMAIL_OAUTH_CLIENT_ID, GMAIL_OAUTH_CLIENT_SECRET, plus one refresh-token
@@ -308,19 +313,48 @@ async function cmdAuthExchange(pasted) {
 
 // ---------- Gmail API ----------
 
+// Waits between retries of a rate-limited request. Gmail's per-user quota is
+// enforced per second and per minute, so the schedule reaches past a minute
+// (about two minutes in total) before giving up.
+const RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 16000, 32000, 60000];
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 429, or 403 with reason rateLimitExceeded / userRateLimitExceeded. Other
+// 403s (permissions, daily quota) are not worth retrying.
+function rateLimitReason(status, text) {
+  if (status === 429) return "429";
+  if (status !== 403) return null;
+  try {
+    const reasons = (JSON.parse(text).error?.errors ?? []).map((e) => e.reason);
+    return reasons.find((r) => r === "rateLimitExceeded" || r === "userRateLimitExceeded") ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function api(key, path, opts = {}) {
   const token = await accessToken(key);
-  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
-    ...opts,
-    headers: {
-      authorization: `Bearer ${token}`,
-      ...(opts.body ? { "content-type": "application/json" } : {}),
-      ...opts.headers,
-    },
-    signal: AbortSignal.timeout(60_000),
-  });
-  if (!res.ok) die(`${path}: ${res.status} ${await res.text()}`);
-  return res.status === 204 ? null : res.json();
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
+      ...opts,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(opts.body ? { "content-type": "application/json" } : {}),
+        ...opts.headers,
+      },
+      signal: AbortSignal.timeout(60_000),
+    });
+    const text = await res.text();
+    if (res.ok) return text ? JSON.parse(text) : null;
+    // A rate-limited request was rejected, not executed, so retrying is safe
+    // for POSTs too.
+    const reason = rateLimitReason(res.status, text);
+    if (!reason || attempt >= RETRY_DELAYS_MS.length) die(`${path}: ${res.status} ${text}`);
+    const retryAfter = Number(res.headers.get("retry-after")) * 1000 || 0;
+    const wait = Math.max(RETRY_DELAYS_MS[attempt], retryAfter) + Math.floor(Math.random() * 500);
+    console.error(`friday-gmail: rate limited (${reason}) on ${path.split("?")[0]}, retry ${attempt + 1}/${RETRY_DELAYS_MS.length} in ${(wait / 1000).toFixed(1)}s`);
+    await sleep(wait);
+  }
 }
 
 function header(msg, name) {
@@ -328,11 +362,25 @@ function header(msg, name) {
 }
 
 const labelCache = {};
-async function labelId(key, name) {
+async function labelMap(key) {
   if (!labelCache[key]) {
     const { labels } = await api(key, "labels");
     labelCache[key] = Object.fromEntries(labels.map((l) => [l.name, l.id]));
   }
+  return labelCache[key];
+}
+
+// Label id by name, without creating it. Gmail label names are unique
+// regardless of case, so fall back to a case-insensitive match.
+async function existingLabelId(key, name) {
+  const map = await labelMap(key);
+  if (map[name]) return map[name];
+  const lower = name.toLowerCase();
+  return Object.entries(map).find(([n]) => n.toLowerCase() === lower)?.[1] ?? null;
+}
+
+async function labelId(key, name) {
+  await labelMap(key);
   if (!labelCache[key][name]) {
     const created = await api(key, "labels", {
       method: "POST",
@@ -751,6 +799,28 @@ else if (cmd === "inbox") {
   if (!name || !ids.length) die("usage: label [account] <name> <msgId...>");
   for (const id of ids) await modify(key, id, [name], []);
   console.log(`labeled ${ids.length}`);
+} else if (cmd === "unlabel") {
+  // Mirror of label. Never creates the label: a missing one means there is
+  // nothing to remove. One batchModify per 1000 ids (the API maximum) instead
+  // of one modify per message keeps large runs inside the per-user quota, and
+  // batchModify works on messages in Trash too.
+  const usage = "unlabel [account] <name> <msgId...>";
+  const [key, rest] = takeAccount(args, usage);
+  const [name, ...ids] = rest;
+  if (!name || !ids.length) die(`usage: ${usage}`);
+  const id = await existingLabelId(key, name);
+  if (!id) {
+    console.log(`unlabeled 0: no label "${name}" in ${key}`);
+  } else {
+    const unique = [...new Set(ids)];
+    for (let i = 0; i < unique.length; i += 1000) {
+      await api(key, "messages/batchModify", {
+        method: "POST",
+        body: JSON.stringify({ ids: unique.slice(i, i + 1000), removeLabelIds: [id] }),
+      });
+    }
+    console.log(`unlabeled ${unique.length}`);
+  }
 } else {
-  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label (no send, by design)");
+  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");
 }
