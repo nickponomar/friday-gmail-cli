@@ -44,6 +44,10 @@ so a release is never a side effect of merging a feature.
    node gmail.js draft <acct> reply-no-cc.txt --reply <msgId>    # warns, not_included
    node gmail.js draft <acct> reply-with-cc.txt --reply <msgId>  # silent
    node gmail.js draft <acct> formatting.txt --sig sig.html      # open it in Gmail
+   node gmail.js calendars <acct>                            # needs a token with calendar access
+   node gmail.js events <acct> --days 3
+   node gmail.js event <acct> <eventId>
+   node gmail.js freebusy <acct> --days 1
    node gmail.js drafts <acct>
    node gmail.js draft-discard <acct> <draftId>                  # for every test draft
    ```
