@@ -129,11 +129,12 @@ friday-gmail label personal "receipts/2026" <msgId>...
 friday-gmail unlabel personal "receipts/2026" <msgId>...
 ```
 
-`unlabel` is the mirror of `label`: it removes the label from each message and
-never creates it. If no label by that name exists (matched regardless of case)
-it prints `unlabeled 0: no label "..." in <account>` and exits 0. It sends the
-ids in batches of up to 1000 (one `messages.batchModify` call each), so passing
-hundreds of ids costs a few requests, and it works on messages in Trash.
+`label` adds the label, creating it if no label by that name exists (names
+match regardless of case, as in Gmail). `unlabel` is its mirror: it removes the
+label and never creates it; if no label by that name exists it prints
+`unlabeled 0: no label "..." in <account>` and exits 0. Both send the ids in
+batches of up to 1000 (one `messages.batchModify` call each), so passing
+hundreds of ids costs a few requests, and both work on messages in Trash.
 
 ### Drafting
 

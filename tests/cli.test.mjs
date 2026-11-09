@@ -121,15 +121,49 @@ test("unlabel without a name or ids prints usage and fails", () => {
   }
 });
 
-test("label still creates a missing label (unchanged)", () => {
-  const r = run(["label", "personal", "brand-new", "m1"], [
+// ---------- label ----------
+
+test("label creates a missing label, then adds it in one batch", () => {
+  const r = run(["label", "personal", "brand-new", "m1", "m2"], [
     LABELS,
     { method: "POST", path: "/labels$", responses: [{ body: { id: "Label_new", name: "brand-new" } }] },
-    { method: "POST", path: "/messages/m1/modify$", responses: [{ body: { id: "m1" } }] },
+    BATCH_OK,
   ]);
   assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "labeled 2");
+  const created = r.gmail.find((e) => e.method === "POST" && e.url.endsWith("/labels"));
+  assert.equal(created.body.name, "brand-new");
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body), [{ ids: ["m1", "m2"], addLabelIds: ["Label_new"] }]);
+});
+
+test("label adds an existing label in batches of at most 1000 ids, without creating it", () => {
+  const r = run(["label", "personal", "receipts/2026", ...ids(2500)], [LABELS, BATCH_OK]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "labeled 2500");
+  const batches = batchCalls(r.gmail);
+  assert.deepEqual(batches.map((b) => b.body.ids.length), [1000, 1000, 500]);
+  assert.deepEqual(batches.flatMap((b) => b.body.ids), ids(2500));
+  for (const b of batches) {
+    assert.deepEqual(b.body.addLabelIds, ["Label_7"]);
+    assert.equal(b.body.removeLabelIds, undefined);
+  }
+  assert.equal(r.gmail.filter((e) => e.method === "POST" && e.url.endsWith("/labels")).length, 0);
+  assert.equal(r.gmail.filter((e) => /\/messages\/[^/]+\/modify$/.test(e.url)).length, 0);
+});
+
+test("label reuses an existing label whose name differs only in case", () => {
+  const r = run(["label", "personal", "newsletters", "m1", "m1"], [LABELS, BATCH_OK]);
+  assert.equal(r.code, 0, r.stderr);
   assert.equal(r.stdout.trim(), "labeled 1");
-  assert.deepEqual(r.gmail.find((e) => e.url.endsWith("/modify")).body.addLabelIds, ["Label_new"]);
+  assert.equal(r.gmail.filter((e) => e.method === "POST" && e.url.endsWith("/labels")).length, 0);
+  assert.deepEqual(batchCalls(r.gmail)[0].body, { ids: ["m1"], addLabelIds: ["Label_9"] });
+});
+
+test("label without a name or ids prints usage and fails", () => {
+  const r = run(["label", "personal", "receipts/2026"], [LABELS, BATCH_OK]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /usage: label \[account\] <name> <msgId\.\.\.>/);
+  assert.equal(r.gmail.length, 0);
 });
 
 // ---------- rate-limit retry ----------
