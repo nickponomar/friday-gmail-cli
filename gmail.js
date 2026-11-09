@@ -47,7 +47,7 @@
 //   archive [account] <msgId...>  remove INBOX, add <prefix>/archived
 //   trash [account] <msgId...>    add <prefix>/trashed, move to Trash
 //   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/*
-//   label [account] <name> <msgId...>  add a label (created if missing)
+//   label [account] <name> <msgId...>  add a label (created if missing). Batched.
 //   unlabel [account] <name> <msgId...>  remove a label (never created; a missing
 //                                 label is a clean no-op). Batched, works in Trash.
 //
@@ -389,6 +389,21 @@ async function labelId(key, name) {
     labelCache[key][name] = created.id;
   }
   return labelCache[key][name];
+}
+
+// Apply one label change to many messages: deduplicated ids, one
+// messages.batchModify per 1000 (the API maximum) instead of one modify per
+// message, which keeps large runs inside the per-user quota. Works on messages
+// in Trash too. Returns the number of distinct ids.
+async function batchModify(key, ids, change) {
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i += 1000) {
+    await api(key, "messages/batchModify", {
+      method: "POST",
+      body: JSON.stringify({ ids: unique.slice(i, i + 1000), ...change }),
+    });
+  }
+  return unique.length;
 }
 
 async function modify(key, msgId, addNames, removeIds) {
@@ -797,13 +812,13 @@ else if (cmd === "inbox") {
   const [key, rest] = takeAccount(args, "label [account] <name> <msgId...>");
   const [name, ...ids] = rest;
   if (!name || !ids.length) die("usage: label [account] <name> <msgId...>");
-  for (const id of ids) await modify(key, id, [name], []);
-  console.log(`labeled ${ids.length}`);
+  // Reuse an existing label even if its case differs (Gmail would refuse to
+  // create "receipts" next to "Receipts"); create it only if there is none.
+  const id = (await existingLabelId(key, name)) ?? (await labelId(key, name));
+  console.log(`labeled ${await batchModify(key, ids, { addLabelIds: [id] })}`);
 } else if (cmd === "unlabel") {
   // Mirror of label. Never creates the label: a missing one means there is
-  // nothing to remove. One batchModify per 1000 ids (the API maximum) instead
-  // of one modify per message keeps large runs inside the per-user quota, and
-  // batchModify works on messages in Trash too.
+  // nothing to remove.
   const usage = "unlabel [account] <name> <msgId...>";
   const [key, rest] = takeAccount(args, usage);
   const [name, ...ids] = rest;
@@ -812,14 +827,7 @@ else if (cmd === "inbox") {
   if (!id) {
     console.log(`unlabeled 0: no label "${name}" in ${key}`);
   } else {
-    const unique = [...new Set(ids)];
-    for (let i = 0; i < unique.length; i += 1000) {
-      await api(key, "messages/batchModify", {
-        method: "POST",
-        body: JSON.stringify({ ids: unique.slice(i, i + 1000), removeLabelIds: [id] }),
-      });
-    }
-    console.log(`unlabeled ${unique.length}`);
+    console.log(`unlabeled ${await batchModify(key, ids, { removeLabelIds: [id] })}`);
   }
 } else {
   die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");

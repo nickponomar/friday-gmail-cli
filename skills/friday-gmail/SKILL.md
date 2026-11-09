@@ -44,10 +44,11 @@ never suggest adding one, and never present a created draft as "sent".
   delete UNSENT drafts.
 - `archive` / `trash` / `restore` / `label` — triage verbs; archive and trash
   tag messages under the configured label prefix and `restore` undoes both.
-- `unlabel [account] <name> <msgId...>`: removes a label (the mirror of
-  `label`). Never creates it: a missing label prints `unlabeled 0: no label
-  ...` and exits 0. Pass all the ids in one call; it batches up to 1000 per
-  request and works on messages in Trash.
+- `label [account] <name> <msgId...>` adds a label (created if missing; an
+  existing one is matched regardless of case). `unlabel` with the same
+  arguments removes it and never creates it: a missing label prints
+  `unlabeled 0: no label ...` and exits 0. For both, pass all the ids in one
+  call: they batch up to 1000 per request and work on messages in Trash.
 - Rate limits (429 / 403 `rateLimitExceeded`) are retried with backoff for
   about two minutes, with a `rate limited ... retry n/7` note on stderr; only
   then does the command fail. Other API errors fail immediately.
