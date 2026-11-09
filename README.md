@@ -115,6 +115,8 @@ friday-gmail accounts                      # list accounts and token status
 friday-gmail count                         # inbox/thread/unread counts
 friday-gmail inbox personal --max 20       # inbox as JSON lines
 friday-gmail search personal 'from:amazon newer_than:7d'
+friday-gmail search personal 'newer_than:30d' --max 2000 --ids  # {id, threadId} only
+friday-gmail meta personal <msgId>...          # search-shaped lines for these ids
 friday-gmail get personal 18c2a4b7d3e5f601     # incl. cc and reply_to
 friday-gmail get personal 18c2a4b7d3e5f601 --html  # plus the raw HTML part
 friday-gmail thread personal 18c2a4b7d3e5f600   # whole conversation, oldest first
@@ -137,6 +139,14 @@ label and never creates it; if no label by that name exists it prints
 `unlabeled 0: no label "..." in <account>` and exits 0. Both send the ids in
 batches of up to 1000 (one `messages.batchModify` call each), so passing
 hundreds of ids costs a few requests, and both work on messages in Trash.
+
+`search --ids` prints only `{"id", "threadId"}` per message, straight from the
+list pages (500 per request) with no request per message, so listing 2,000
+messages costs 4 requests instead of about 2,000. `meta` then prints the full
+`search` line for the ids you pass, one request each and in the order given;
+an id that no longer exists is skipped with a note on stderr, and the command
+still exits 0. Together they let a caller that caches metadata (senders,
+subjects and dates never change) fetch it only for messages it has not seen.
 
 `thread` prints every message of a conversation (the `threadId` on `inbox`,
 `search` and `get` lines) as one JSON line each, oldest first, in exactly the

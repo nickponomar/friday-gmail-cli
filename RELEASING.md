@@ -39,6 +39,8 @@ so a release is never a side effect of merging a feature.
    ```sh
    node gmail.js --version
    node gmail.js search <acct> 'newer_than:7d' --max 5      # cc, reply_to on each line
+   node gmail.js search <acct> 'newer_than:30d' --max 1200 --ids  # 3 list requests, no gets
+   node gmail.js meta <acct> <msgId> <otherMsgId>            # same lines as search, in order
    node gmail.js get <acct> <msgId>                          # cc, reply_to
    node gmail.js get <acct> <msgId> --html                   # plus html
    node gmail.js thread <acct> <threadId>                    # oldest first, get-shaped lines
