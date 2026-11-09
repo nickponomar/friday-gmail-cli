@@ -1,7 +1,7 @@
 {
   "name": "friday-gmail-cli",
   "version": "0.4.1",
-  "description": "A zero-dependency Gmail CLI for AI agents that structurally cannot send email. It reads, labels, and drafts; a human clicks send.",
+  "description": "A zero-dependency Gmail CLI for AI agents that structurally cannot send email. It reads, labels, and drafts; a human clicks send. Reads Google Calendar too, read-only.",
   "type": "module",
   "bin": {
     "friday-gmail": "gmail.js"
@@ -26,7 +26,9 @@
     "no-send",
     "inbox",
     "triage",
-    "claude"
+    "claude",
+    "google-calendar",
+    "calendar"
   ],
   "author": "Nick Ponomar",
   "license": "MIT",

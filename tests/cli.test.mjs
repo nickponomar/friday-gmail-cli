@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const CLI = fileURLToPath(new URL("../gmail.js", import.meta.url));
 const MOCK = pathToFileURL(fileURLToPath(new URL("./fetch-mock.mjs", import.meta.url))).href;
 
-function run(args, routes) {
+function run(args, routes, { state, tz = "UTC" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "friday-gmail-test-"));
   const config = join(dir, "config.json");
   writeFileSync(config, JSON.stringify({
@@ -23,10 +23,15 @@ function run(args, routes) {
   }));
   writeFileSync(join(dir, "scenario.json"), JSON.stringify({ routes }));
   writeFileSync(join(dir, "log.jsonl"), "");
+  if (state) {
+    mkdirSync(join(dir, "state"), { recursive: true });
+    writeFileSync(join(dir, "state", "state.json"), JSON.stringify(state));
+  }
   const r = spawnSync(process.execPath, ["--import", MOCK, CLI, ...args], {
     encoding: "utf8",
     env: {
       PATH: process.env.PATH,
+      TZ: tz,
       FRIDAY_GMAIL_CONFIG: config,
       GMAIL_OAUTH_CLIENT_ID: "test-client",
       GMAIL_OAUTH_CLIENT_SECRET: "test-secret",
@@ -38,7 +43,9 @@ function run(args, routes) {
   });
   const log = readFileSync(join(dir, "log.jsonl"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const gmail = log.filter((e) => e.url?.startsWith("/gmail/"));
-  return { code: r.status, stdout: r.stdout, stderr: r.stderr, gmail, sleeps: log.filter((e) => "sleep" in e).map((e) => e.sleep) };
+  const calendar = log.filter((e) => e.url?.startsWith("/calendar/"));
+  const lines = r.stdout.trim() ? r.stdout.trim().split("\n") : [];
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, lines, gmail, calendar, log, sleeps: log.filter((e) => "sleep" in e).map((e) => e.sleep) };
 }
 
 const LABELS = {
@@ -235,4 +242,225 @@ test("other errors are not retried", () => {
     assert.equal(r.code, 1, `status ${resp.status} should fail`);
     assert.equal(r.sleeps.length, 0);
   }
+});
+
+// ---------- calendar (read-only) ----------
+
+const midnightUTC = (d = new Date()) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+const qs = (entry) => new URL("https://x" + entry.url).searchParams;
+
+const TIMED = {
+  id: "ev1", status: "confirmed", htmlLink: "https://calendar.google.com/event?eid=ev1",
+  summary: "Weekly sync", location: "Room 1", recurringEventId: "series1",
+  start: { dateTime: "2026-11-10T09:00:00+01:00" }, end: { dateTime: "2026-11-10T09:30:00+01:00" },
+  organizer: { email: "lead@example.com" },
+  attendees: [
+    { email: "lead@example.com", displayName: "Lead", responseStatus: "accepted", organizer: true },
+    { email: "you@example.com", responseStatus: "tentative", self: true },
+    { email: "guest@example.com", responseStatus: "needsAction", optional: true },
+  ],
+  conferenceData: { entryPoints: [{ entryPointType: "phone", uri: "tel:+1" }, { entryPointType: "video", uri: "https://meet.google.com/abc-defg-hij" }] },
+  description: "Agenda: numbers", creator: { email: "lead@example.com" }, created: "2026-01-01T00:00:00Z", updated: "2026-11-01T00:00:00Z",
+  recurrence: ["RRULE:FREQ=WEEKLY"],
+};
+const ALL_DAY = {
+  id: "ev2", status: "confirmed", summary: "Offsite", start: { date: "2026-11-11" }, end: { date: "2026-11-12" },
+  organizer: { email: "you@example.com", self: true }, hangoutLink: "https://meet.google.com/xyz",
+};
+
+test("calendars lists every calendar across pages", () => {
+  const r = run(["calendars", "personal"], [
+    { method: "GET", path: "/calendar/v3/users/me/calendarList$", responses: [
+      { body: { items: [{ id: "you@example.com", summary: "You", primary: true, accessRole: "owner", timeZone: "Europe/Berlin" }], nextPageToken: "p2" } },
+      { body: { items: [{ id: "team@group.calendar.google.com", summary: "Team", summaryOverride: "Team (mine)", accessRole: "reader", timeZone: "UTC" }] } },
+    ] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.lines.map((l) => JSON.parse(l)), [
+    { id: "you@example.com", name: "You", primary: true, access: "owner", time_zone: "Europe/Berlin" },
+    { id: "team@group.calendar.google.com", name: "Team (mine)", primary: false, access: "reader", time_zone: "UTC" },
+  ]);
+  assert.equal(qs(r.calendar[1]).get("pageToken"), "p2");
+});
+
+test("events defaults to the primary calendar, today for 7 days, recurring expanded", () => {
+  const r = run(["events", "personal"], [
+    { method: "GET", path: "/calendar/v3/calendars/primary/events$", responses: [{ body: { items: [TIMED, ALL_DAY] } }] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  const q = qs(r.calendar[0]);
+  const today = midnightUTC();
+  assert.equal(q.get("timeMin"), today.toISOString());
+  assert.equal(q.get("timeMax"), new Date(today.getTime() + 7 * 86400000).toISOString());
+  assert.equal(q.get("singleEvents"), "true");
+  assert.equal(q.get("orderBy"), "startTime");
+  assert.equal(q.get("maxResults"), "100");
+  const [timed, allDay] = r.lines.map((l) => JSON.parse(l));
+  assert.deepEqual(timed, {
+    id: "ev1", calendar: "primary", start: "2026-11-10T09:00:00+01:00", end: "2026-11-10T09:30:00+01:00", all_day: false,
+    title: "Weekly sync", location: "Room 1", organizer: "lead@example.com",
+    attendees: [
+      { email: "lead@example.com", name: "Lead", response: "accepted" },
+      { email: "you@example.com", name: "", response: "tentative" },
+      { email: "guest@example.com", name: "", response: "needsAction", optional: true },
+    ],
+    my_response: "tentative", meet: "https://meet.google.com/abc-defg-hij", status: "confirmed", recurring: true,
+    link: "https://calendar.google.com/event?eid=ev1",
+  });
+  assert.equal(timed.description, undefined);
+  assert.equal(allDay.all_day, true);
+  assert.equal(allDay.start, "2026-11-11");
+  assert.equal(allDay.my_response, "organizer");
+  assert.equal(allDay.meet, "https://meet.google.com/xyz");
+  assert.equal(allDay.recurring, false);
+});
+
+test("events --from/--to are local days and --to includes its whole day; --calendar and --q pass through", () => {
+  const r = run(["events", "personal", "--from", "2026-11-10", "--to", "2026-11-12", "--calendar", "team@example.com", "--q", "budget"], [
+    { method: "GET", path: "/calendar/v3/calendars/team%40example.com/events$", responses: [{ body: { items: [] } }] },
+  ], { tz: "Europe/Berlin" });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, "");
+  const q = qs(r.calendar[0]);
+  assert.equal(q.get("timeMin"), "2026-11-09T23:00:00.000Z");
+  assert.equal(q.get("timeMax"), "2026-11-12T23:00:00.000Z");
+  assert.equal(q.get("q"), "budget");
+});
+
+test("events --from <date-time> --days N", () => {
+  const r = run(["events", "personal", "--from", "2026-11-10T08:00:00+01:00", "--days", "2"], [
+    { method: "GET", path: "/calendar/v3/calendars/primary/events$", responses: [{ body: { items: [] } }] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  const q = qs(r.calendar[0]);
+  assert.equal(q.get("timeMin"), "2026-11-10T07:00:00.000Z");
+  assert.equal(q.get("timeMax"), "2026-11-12T07:00:00.000Z");
+});
+
+test("events follows pages and stops at --max", () => {
+  const ev = (id) => ({ ...ALL_DAY, id });
+  const r = run(["events", "personal", "--max", "4"], [
+    { method: "GET", path: "/calendar/v3/calendars/primary/events$", responses: [
+      { body: { items: [ev("a"), ev("b"), ev("c")], nextPageToken: "p2" } },
+      { body: { items: [ev("d"), ev("e")], nextPageToken: "p3" } },
+    ] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.lines.map((l) => JSON.parse(l).id), ["a", "b", "c", "d"]);
+  assert.equal(r.calendar.length, 2);
+  assert.equal(qs(r.calendar[0]).get("maxResults"), "4");
+  assert.equal(qs(r.calendar[1]).get("maxResults"), "1");
+  assert.equal(qs(r.calendar[1]).get("pageToken"), "p2");
+});
+
+test("events rejects bad ranges before calling the API", () => {
+  const cases = [
+    [["--from", "12.11.2026"], /--from must be YYYY-MM-DD or an ISO date-time/],
+    [["--from", "2026-11-12", "--to", "2026-11-10"], /end of the range must be after its start/],
+    [["--days", "0"], /--days must be a positive number/],
+    [["--max", "x"], /--max must be a positive number/],
+    [["--calendar"], /--calendar needs a value/],
+  ];
+  for (const [extra, msg] of cases) {
+    const r = run(["events", "personal", ...extra], []);
+    assert.equal(r.code, 1, extra.join(" "));
+    assert.match(r.stderr, msg);
+    assert.equal(r.calendar.length, 0);
+  }
+});
+
+test("event returns one event in full", () => {
+  const r = run(["event", "personal", "--calendar", "team@example.com", "ev1"], [
+    { method: "GET", path: "/calendar/v3/calendars/team%40example.com/events/ev1$", responses: [{ body: { ...TIMED, attachments: [{ title: "Deck", fileUrl: "https://drive.google.com/x" }] } }] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  const e = JSON.parse(r.stdout);
+  assert.equal(e.calendar, "team@example.com");
+  assert.equal(e.description, "Agenda: numbers");
+  assert.deepEqual(e.recurrence, ["RRULE:FREQ=WEEKLY"]);
+  assert.equal(e.creator, "lead@example.com");
+  assert.deepEqual(e.attachments, [{ title: "Deck", url: "https://drive.google.com/x" }]);
+  assert.equal(e.visibility, "default");
+
+  const u = run(["event", "personal"], []);
+  assert.equal(u.code, 1);
+  assert.match(u.stderr, /usage: event \[account\] <eventId>/);
+});
+
+test("freebusy queries the given calendars (default primary) and prints busy slots", () => {
+  const r = run(["freebusy", "personal", "--from", "2026-11-10", "--days", "1", "--calendar", "you@example.com", "--calendar", "team@example.com"], [
+    { method: "POST", path: "/calendar/v3/freeBusy$", responses: [{ body: { calendars: {
+      "you@example.com": { busy: [{ start: "2026-11-10T09:00:00Z", end: "2026-11-10T10:00:00Z" }] },
+      "team@example.com": { busy: [], errors: [{ domain: "global", reason: "notFound" }] },
+    } } }] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(r.calendar[0].body, {
+    timeMin: "2026-11-10T00:00:00.000Z", timeMax: "2026-11-11T00:00:00.000Z",
+    items: [{ id: "you@example.com" }, { id: "team@example.com" }],
+  });
+  const [mine, team] = r.lines.map((l) => JSON.parse(l));
+  assert.deepEqual(mine.busy, [{ start: "2026-11-10T09:00:00Z", end: "2026-11-10T10:00:00Z" }]);
+  assert.deepEqual(team.errors, ["notFound"]);
+
+  const d = run(["freebusy", "personal"], [{ method: "POST", path: "/calendar/v3/freeBusy$", responses: [{ body: { calendars: {} } }] }]);
+  assert.deepEqual(d.calendar[0].body.items, [{ id: "primary" }]);
+});
+
+test("calendar commands only read: GET everywhere except the freeBusy query", () => {
+  const routes = [
+    { method: "GET", path: "/calendar/v3/", responses: [{ body: { items: [TIMED] } }] },
+    { method: "POST", path: "/calendar/v3/freeBusy$", responses: [{ body: { calendars: {} } }] },
+  ];
+  const all = [["calendars", "personal"], ["events", "personal"], ["event", "personal", "ev1"], ["freebusy", "personal"]].flatMap((a) => run(a, routes).calendar);
+  assert.equal(all.length, 4);
+  for (const e of all) assert.ok(e.method === "GET" || e.url === "/calendar/v3/freeBusy", `${e.method} ${e.url}`);
+});
+
+test("a token without the calendar scope gets a fix-it message, not a raw 403", () => {
+  const scope403 = { status: 403, body: { error: { code: 403, message: "Request had insufficient authentication scopes.", errors: [{ reason: "insufficientPermissions" }], status: "PERMISSION_DENIED", details: [{ reason: "ACCESS_TOKEN_SCOPE_INSUFFICIENT" }] } } };
+  const r = run(["events", "personal"], [{ method: "GET", path: "/calendar/v3/", responses: [scope403] }]);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /no calendar access\. Run auth-url personal and auth-exchange again, then replace TEST_TOKEN_PERSONAL/);
+  assert.doesNotMatch(r.stderr, /insufficient authentication scopes/);
+  assert.equal(r.sleeps.length, 0);
+
+  const disabled = { status: 403, body: { error: { code: 403, message: "Calendar API has not been used", errors: [{ reason: "accessNotConfigured" }] } } };
+  const d = run(["calendars", "personal"], [{ method: "GET", path: "/calendar/v3/", responses: [disabled] }]);
+  assert.equal(d.code, 1);
+  assert.match(d.stderr, /Google Calendar API is not enabled/);
+});
+
+test("calendar requests get the same rate-limit retry", () => {
+  const r = run(["calendars", "personal"], [{ method: "GET", path: "/calendar/v3/", responses: [rateLimit403(), { body: { items: [] } }] }]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.sleeps.length, 1);
+  assert.match(r.stderr, /rate limited \(rateLimitExceeded\) on users\/me\/calendarList, retry 1\/7/);
+});
+
+// ---------- auth ----------
+
+test("auth-url asks for gmail.modify and calendar.readonly, nothing else", () => {
+  const r = run(["auth-url", "personal"], []);
+  assert.equal(r.code, 0, r.stderr);
+  const url = new URL(r.stdout.match(/https:\/\/accounts\.google\.com\/\S+/)[0]);
+  assert.deepEqual(url.searchParams.get("scope").split(" "), [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar.readonly",
+  ]);
+  assert.equal(url.searchParams.get("access_type"), "offline");
+  assert.equal(url.searchParams.get("login_hint"), "you@example.com");
+});
+
+test("auth-exchange reports whether the new token can read the calendar", () => {
+  const profile = { method: "GET", path: "/gmail/v1/users/me/profile$", responses: [{ body: { emailAddress: "you@example.com" } }] };
+  const token = (scope) => ({ method: "POST", path: "/token$", responses: [{ body: { access_token: "a", refresh_token: "r", scope } }] });
+  const both = run(["auth-exchange", "test-code"], [profile, token("https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/calendar.readonly")], { state: { pkce_verifier: "v" } });
+  assert.equal(both.code, 0, both.stderr);
+  const out = JSON.parse(both.stdout);
+  assert.equal(out.account, "personal");
+  assert.equal(out.calendar, true);
+  assert.equal(out.refresh_token, "r");
+  const mailOnly = run(["auth-exchange", "test-code"], [profile, token("https://www.googleapis.com/auth/gmail.modify")], { state: { pkce_verifier: "v" } });
+  assert.equal(JSON.parse(mailOnly.stdout).calendar, false);
 });

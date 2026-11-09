@@ -15,8 +15,9 @@ globalThis.fetch = async (url, opts = {}) => {
   const u = new URL(String(url));
   const method = (opts.method ?? "GET").toUpperCase();
   log({ method, url: u.pathname + u.search, body: typeof opts.body === "string" ? JSON.parse(opts.body) : null });
-  if (u.host === "oauth2.googleapis.com") return Response.json({ access_token: "test-access-token" });
   const i = routes.findIndex((r) => r.method === method && new RegExp(r.path).test(u.pathname));
+  // The token endpoint answers with a test access token unless a route overrides it.
+  if (i < 0 && u.host === "oauth2.googleapis.com") return Response.json({ access_token: "test-access-token" });
   if (i < 0) return Response.json({ error: { code: 404, message: `no mock for ${method} ${u.pathname}` } }, { status: 404 });
   const n = calls.get(i) ?? 0;
   calls.set(i, n + 1);

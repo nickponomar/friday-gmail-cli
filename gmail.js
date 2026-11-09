@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 // friday-gmail: a Gmail CLI for AI agents that structurally cannot send email.
-// It reads, labels, and drafts. A human clicks send.
+// It reads, labels, and drafts. A human clicks send. It can also read (never
+// change) Google Calendar.
 //
 // Safety properties (the whole point):
 //   * No send capability exists in this code. Not a flag, not a hidden command.
 //     `draft` creates an UNSENT Gmail draft; nothing leaves until a human clicks
 //     send in Gmail.
-//   * OAuth scope is gmail.modify only, so it cannot permanently delete mail.
+//   * OAuth scopes are gmail.modify (so it cannot permanently delete mail) and
+//     calendar.readonly (so it cannot create, change or delete events).
 //   * archive/trash tag messages under a configurable label prefix as an audit
 //     trail, and `restore` undoes them.
 //
@@ -48,6 +50,14 @@
 //   trash [account] <msgId...>    add <prefix>/trashed, move to Trash
 //   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/*
 //   label [account] <name> <msgId...>  add a label (created if missing). Batched.
+//   calendars [account]           calendars this account can see (JSON lines)
+//   events [account] [--from D] [--to D] [--days N] [--calendar ID] [--q TEXT] [--max N]
+//                                 events as JSON lines, recurring ones expanded, in start
+//                                 order. D is YYYY-MM-DD (local) or an ISO date-time; a
+//                                 date --to includes that whole day. Default: primary
+//                                 calendar, today for 7 days, max 100.
+//   event [account] <eventId> [--calendar ID]  one event in full (incl. description)
+//   freebusy [account] [--from D] [--to D] [--days N] [--calendar ID...]  busy slots
 //   unlabel [account] <name> <msgId...>  remove a label (never created; a missing
 //                                 label is a clean no-op). Batched, works in Trash.
 //
@@ -123,7 +133,9 @@ if (argv[0] === "--version" || argv[0] === "-v") {
 const CONFIG = loadConfig(argv);
 const ACCOUNTS = CONFIG.accounts;
 const LABEL_PREFIX = CONFIG.labelPrefix;
-const SCOPE = "https://www.googleapis.com/auth/gmail.modify";
+// Tokens issued before calendar support carry only gmail.modify: mail keeps
+// working with them, calendar commands say to re-run auth-url.
+const SCOPE = ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/calendar.readonly"].join(" ");
 const REDIRECT_URI = `http://127.0.0.1:${CONFIG.redirectPort}`;
 const STATE_DIR = CONFIG.stateDir;
 const STATE_FILE = join(STATE_DIR, "state.json");
@@ -308,7 +320,8 @@ async function cmdAuthExchange(pasted) {
     signal: AbortSignal.timeout(30_000),
   }).then((r) => r.json());
   const match = Object.entries(ACCOUNTS).find(([, a]) => a.email === prof.emailAddress);
-  console.log(JSON.stringify({ email: prof.emailAddress, account: match?.[0] ?? null, token_env: match?.[1].tokenEnv ?? null, refresh_token: body.refresh_token }));
+  const scopes = (body.scope ?? "").split(" ").filter(Boolean);
+  console.log(JSON.stringify({ email: prof.emailAddress, account: match?.[0] ?? null, token_env: match?.[1].tokenEnv ?? null, calendar: scopes.some((x) => x.endsWith("/calendar.readonly")), scopes, refresh_token: body.refresh_token }));
 }
 
 // ---------- Gmail API ----------
@@ -332,10 +345,24 @@ function rateLimitReason(status, text) {
   }
 }
 
-async function api(key, path, opts = {}) {
+// Gmail API, relative to users/me/.
+const api = (key, path, opts) => request(key, `https://gmail.googleapis.com/gmail/v1/users/me/${path}`, path, opts);
+
+// Calendar API, relative to calendar/v3/. A token from before calendar support
+// lacks the scope; say how to fix that instead of dumping the raw 403.
+const cal = (key, path, opts) =>
+  request(key, `https://www.googleapis.com/calendar/v3/${path}`, path, opts, (status, text) => {
+    if (status === 403 && /insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT/.test(text))
+      return `this account's token has no calendar access. Run auth-url ${key} and auth-exchange again, then replace ${account(key).tokenEnv} with the new refresh token`;
+    if (status === 403 && /accessNotConfigured|SERVICE_DISABLED/.test(text))
+      return "the Google Calendar API is not enabled in the Google Cloud project of this OAuth client. Enable it there and retry";
+    return null;
+  });
+
+async function request(key, url, path, opts = {}, hint = () => null) {
   const token = await accessToken(key);
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
+    const res = await fetch(url, {
       ...opts,
       headers: {
         authorization: `Bearer ${token}`,
@@ -349,7 +376,10 @@ async function api(key, path, opts = {}) {
     // A rate-limited request was rejected, not executed, so retrying is safe
     // for POSTs too.
     const reason = rateLimitReason(res.status, text);
-    if (!reason || attempt >= RETRY_DELAYS_MS.length) die(`${path}: ${res.status} ${text}`);
+    if (!reason || attempt >= RETRY_DELAYS_MS.length) {
+      const h = hint(res.status, text);
+      die(h ? `${path.split("?")[0]}: ${h}` : `${path}: ${res.status} ${text}`);
+    }
     const retryAfter = Number(res.headers.get("retry-after")) * 1000 || 0;
     const wait = Math.max(RETRY_DELAYS_MS[attempt], retryAfter) + Math.floor(Math.random() * 500);
     console.error(`friday-gmail: rate limited (${reason}) on ${path.split("?")[0]}, retry ${attempt + 1}/${RETRY_DELAYS_MS.length} in ${(wait / 1000).toFixed(1)}s`);
@@ -737,6 +767,145 @@ async function cmdDraft(key, args) {
   }));
 }
 
+// ---------- Calendar (read-only) ----------
+
+function flagValue(args, name) {
+  const i = args.indexOf(name);
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  if (v === undefined || v.startsWith("--")) die(`${name} needs a value`);
+  return v;
+}
+
+function flagValues(args, name) {
+  const out = [];
+  args.forEach((a, i) => {
+    if (a === name) out.push(args[i + 1] ?? die(`${name} needs a value`));
+  });
+  return out;
+}
+
+// YYYY-MM-DD is a local calendar day; anything else must parse as a date-time.
+// endOfDay turns a bare date into the following midnight, so "--to 2026-11-12"
+// includes all of the 12th.
+function parseWhen(s, flag, endOfDay = false) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]) + (endOfDay ? 1 : 0));
+  const d = new Date(s);
+  if (!/\d{4}-\d{2}-\d{2}T/.test(s) || Number.isNaN(d.getTime())) die(`${flag} must be YYYY-MM-DD or an ISO date-time like 2026-11-12T09:00:00+01:00, got "${s}"`);
+  return d;
+}
+
+// --from (default: start of today, local), then --to or --days (default 7).
+function timeRange(args) {
+  const fromArg = flagValue(args, "--from");
+  const toArg = flagValue(args, "--to");
+  const daysArg = flagValue(args, "--days");
+  const now = new Date();
+  const from = fromArg ? parseWhen(fromArg, "--from") : new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let to;
+  if (toArg) to = parseWhen(toArg, "--to", true);
+  else {
+    const days = daysArg === undefined ? 7 : Number(daysArg);
+    if (!(days > 0)) die(`--days must be a positive number, got "${daysArg}"`);
+    to = new Date(from.getTime() + days * 86_400_000);
+  }
+  if (to <= from) die("the end of the range must be after its start");
+  return { timeMin: from.toISOString(), timeMax: to.toISOString() };
+}
+
+function eventLine(e, calendarId, full = false) {
+  const self = e.attendees?.find((a) => a.self);
+  const meet = e.hangoutLink ?? e.conferenceData?.entryPoints?.find((p) => p.entryPointType === "video")?.uri ?? "";
+  const line = {
+    id: e.id,
+    calendar: calendarId,
+    start: e.start?.dateTime ?? e.start?.date ?? "",
+    end: e.end?.dateTime ?? e.end?.date ?? "",
+    all_day: Boolean(e.start?.date && !e.start?.dateTime),
+    title: e.summary ?? "",
+    location: e.location ?? "",
+    organizer: e.organizer?.email ?? "",
+    attendees: (e.attendees ?? []).map((a) => ({ email: a.email ?? "", name: a.displayName ?? "", response: a.responseStatus ?? "", ...(a.optional ? { optional: true } : {}) })),
+    my_response: self?.responseStatus ?? (e.organizer?.self ? "organizer" : ""),
+    meet,
+    status: e.status ?? "",
+    recurring: Boolean(e.recurringEventId),
+    link: e.htmlLink ?? "",
+  };
+  if (full) {
+    Object.assign(line, {
+      description: e.description ?? "",
+      recurrence: e.recurrence ?? [],
+      creator: e.creator?.email ?? "",
+      created: e.created ?? "",
+      updated: e.updated ?? "",
+      visibility: e.visibility ?? "default",
+      attachments: (e.attachments ?? []).map((a) => ({ title: a.title ?? "", url: a.fileUrl ?? "" })),
+    });
+  }
+  return line;
+}
+
+async function cmdCalendars(key) {
+  let pageToken;
+  do {
+    const q = new URLSearchParams({ maxResults: "250" });
+    if (pageToken) q.set("pageToken", pageToken);
+    const page = await cal(key, `users/me/calendarList?${q}`);
+    for (const c of page.items ?? []) {
+      console.log(JSON.stringify({ id: c.id, name: c.summaryOverride ?? c.summary ?? "", primary: Boolean(c.primary), access: c.accessRole ?? "", time_zone: c.timeZone ?? "" }));
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+}
+
+async function cmdEvents(key, args) {
+  const calendarId = flagValue(args, "--calendar") ?? "primary";
+  const text = flagValue(args, "--q");
+  const maxArg = flagValue(args, "--max");
+  const max = maxArg === undefined ? 100 : Number(maxArg);
+  if (!(max > 0)) die(`--max must be a positive number, got "${maxArg}"`);
+  const { timeMin, timeMax } = timeRange(args);
+  let pageToken;
+  let fetched = 0;
+  do {
+    const q = new URLSearchParams({ timeMin, timeMax, singleEvents: "true", orderBy: "startTime", maxResults: String(Math.min(max - fetched, 250)) });
+    if (text) q.set("q", text);
+    if (pageToken) q.set("pageToken", pageToken);
+    const page = await cal(key, `calendars/${encodeURIComponent(calendarId)}/events?${q}`);
+    for (const e of page.items ?? []) {
+      if (fetched >= max) break;
+      console.log(JSON.stringify(eventLine(e, calendarId)));
+      fetched++;
+    }
+    pageToken = page.nextPageToken;
+  } while (pageToken && fetched < max);
+}
+
+async function cmdEvent(key, args) {
+  const usage = "event [account] <eventId> [--calendar ID]";
+  const calendarId = flagValue(args, "--calendar") ?? "primary";
+  const ci = args.indexOf("--calendar");
+  const eventId = args.filter((_, i) => ci < 0 || (i !== ci && i !== ci + 1))[0];
+  if (!eventId || eventId.startsWith("--")) die(`usage: ${usage}`);
+  const e = await cal(key, `calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`);
+  console.log(JSON.stringify(eventLine(e, calendarId, true)));
+}
+
+async function cmdFreebusy(key, args) {
+  const ids = flagValues(args, "--calendar");
+  const { timeMin, timeMax } = timeRange(args);
+  // A POST, but a query: freeBusy only reads (calendar.readonly allows it).
+  const res = await cal(key, "freeBusy", {
+    method: "POST",
+    body: JSON.stringify({ timeMin, timeMax, items: (ids.length ? ids : ["primary"]).map((id) => ({ id })) }),
+  });
+  for (const [id, c] of Object.entries(res.calendars ?? {})) {
+    console.log(JSON.stringify({ calendar: id, from: timeMin, to: timeMax, busy: c.busy ?? [], ...(c.errors?.length ? { errors: c.errors.map((x) => x.reason) } : {}) }));
+  }
+}
+
 // ---------- main ----------
 
 if (!CLIENT_ID || !CLIENT_SECRET) die("GMAIL_OAUTH_CLIENT_ID / GMAIL_OAUTH_CLIENT_SECRET not set");
@@ -816,6 +985,18 @@ else if (cmd === "inbox") {
   // create "receipts" next to "Receipts"); create it only if there is none.
   const id = (await existingLabelId(key, name)) ?? (await labelId(key, name));
   console.log(`labeled ${await batchModify(key, ids, { addLabelIds: [id] })}`);
+} else if (cmd === "calendars") {
+  const [key] = takeAccount(args, "calendars [account]");
+  await cmdCalendars(key);
+} else if (cmd === "events") {
+  const [key, rest] = takeAccount(args, "events [account] [--from D] [--to D] [--days N] [--calendar ID] [--q TEXT] [--max N]");
+  await cmdEvents(key, rest);
+} else if (cmd === "event") {
+  const [key, rest] = takeAccount(args, "event [account] <eventId> [--calendar ID]");
+  await cmdEvent(key, rest);
+} else if (cmd === "freebusy") {
+  const [key, rest] = takeAccount(args, "freebusy [account] [--from D] [--to D] [--days N] [--calendar ID...]");
+  await cmdFreebusy(key, rest);
 } else if (cmd === "unlabel") {
   // Mirror of label. Never creates the label: a missing one means there is
   // nothing to remove.
@@ -830,5 +1011,5 @@ else if (cmd === "inbox") {
     console.log(`unlabeled ${await batchModify(key, ids, { removeLabelIds: [id] })}`);
   }
 } else {
-  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");
+  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel | calendars | events | event | freebusy (no send, by design)");
 }

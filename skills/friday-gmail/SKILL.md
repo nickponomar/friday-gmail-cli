@@ -1,6 +1,6 @@
 ---
 name: friday-gmail
-description: Read, search, triage, and draft (never send) email in Gmail via the friday-gmail CLI. Use when asked to check mail, find a message or attachment, clean up an inbox, or prepare an email or reply draft in an account configured for friday-gmail.
+description: Read, search, triage, and draft (never send) email in Gmail, and read (never change) Google Calendar, via the friday-gmail CLI. Use when asked to check mail, find a message or attachment, clean up an inbox, prepare an email or reply draft, or look up events and free time in an account configured for friday-gmail.
 ---
 
 # friday-gmail: Gmail from the command line, drafts only
@@ -9,6 +9,8 @@ description: Read, search, triage, and draft (never send) email in Gmail via the
 hard safety property: it has NO send command. `draft` creates unsent Gmail
 drafts; a human reviews and clicks send in Gmail. Never look for a send path,
 never suggest adding one, and never present a created draft as "sent".
+Calendar access is read-only (`calendar.readonly`): it can list events and
+free/busy slots but cannot create, accept, move or delete anything.
 
 ## Setup expectations
 
@@ -49,6 +51,20 @@ never suggest adding one, and never present a created draft as "sent".
   arguments removes it and never creates it: a missing label prints
   `unlabeled 0: no label ...` and exits 0. For both, pass all the ids in one
   call: they batch up to 1000 per request and work on messages in Trash.
+- `calendars [account]`: calendars the account can see (id, name, primary,
+  access, time_zone).
+- `events [account] [--from D] [--to D] [--days N] [--calendar ID] [--q TEXT] [--max N]`:
+  JSON lines in start order, recurring events expanded: id, calendar, start,
+  end, all_day, title, location, organizer, attendees, my_response, meet,
+  status, recurring, link. D is `YYYY-MM-DD` (local day; `--to` includes it)
+  or an ISO date-time. Default: primary calendar, today for 7 days, max 100.
+- `event [account] <eventId> [--calendar ID]`: one event plus description,
+  recurrence, creator, attachments.
+- `freebusy [account] [--from D] [--to D] [--days N] [--calendar ID...]`: busy
+  slots per calendar; use it to propose meeting times in a draft.
+- A calendar command that says the token has "no calendar access" means that
+  account was authorized before calendar support: tell the user to re-run
+  `auth-url`/`auth-exchange` for it. Mail commands are unaffected.
 - Rate limits (429 / 403 `rateLimitExceeded`) are retried with backoff for
   about two minutes, with a `rate limited ... retry n/7` note on stderr; only
   then does the command fail. Other API errors fail immediately.
@@ -82,7 +98,7 @@ never suggest adding one, and never present a created draft as "sent".
 
 ## Triage etiquette
 
-- Reading is always safe. `archive`/`trash`/`label`/`unlabel` modify the user's mailbox:
+- Reading mail and calendar is always safe. `archive`/`trash`/`label`/`unlabel` modify the user's mailbox:
   do them when the user asked for triage, and summarize what was moved with
   message ids so any action can be undone with `restore <msgId...>`.
 - Trash is Gmail's trash (recoverable ~30 days); the tool's `gmail.modify`

@@ -16,8 +16,9 @@ scope, not in instructions.
 - **No send capability exists.** Not a flag, not a hidden command, not an API path.
   `draft` creates an unsent Gmail draft; nothing leaves your outbox until a human
   opens Gmail and clicks send.
-- **Scope is `gmail.modify` only**, so it cannot permanently delete mail either.
-  Trash is Gmail's trash, with its normal 30-day recovery.
+- **Scopes are `gmail.modify` and `calendar.readonly`**, so it cannot permanently
+  delete mail either (Trash is Gmail's trash, with its normal 30-day recovery),
+  and it can read your calendar but never create, change or delete an event.
 - **Every action leaves an audit trail.** `archive` and `trash` tag messages under
   a configurable label prefix (`friday/archived`, `friday/trashed`), and `restore`
   undoes them in one command.
@@ -38,6 +39,8 @@ it can do is mislabel something, and you can see and undo everything it did.
   paragraphs and `1.` / `-` lists become real HTML paragraphs and lists, so the
   layout survives editing in HTML mail clients
 - Non-ASCII-safe headers (RFC 2047 encoding for names and subjects)
+- Read-only Google Calendar: list calendars, events in a date range (recurring
+  events expanded), one event in full, and free/busy slots
 - Deep links into Gmail web for every message, pinned to the right account
 - PKCE OAuth flow you complete in any browser, on any device
 - Single file, zero npm dependencies, Node 18+
@@ -58,8 +61,9 @@ vendoring is a supported lifestyle.
 ### 1. Create a Google OAuth client
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create a project
-   and enable the **Gmail API**.
-2. Configure the OAuth consent screen. For personal use, add yourself as a user.
+   and enable the **Gmail API** and the **Google Calendar API**.
+2. Configure the OAuth consent screen with the scopes `gmail.modify` and
+   `calendar.readonly`. For personal use, add yourself as a user.
    Note: while the app's publishing status is "Testing", Google expires refresh
    tokens after 7 days; set it to "In production" for long-lived tokens (the
    unverified-app warning during consent is fine for personal use).
@@ -135,6 +139,35 @@ label and never creates it; if no label by that name exists it prints
 `unlabeled 0: no label "..." in <account>` and exits 0. Both send the ids in
 batches of up to 1000 (one `messages.batchModify` call each), so passing
 hundreds of ids costs a few requests, and both work on messages in Trash.
+
+### Calendar (read-only)
+
+```sh
+friday-gmail calendars personal                    # id, name, primary, access, time_zone
+friday-gmail events personal                       # primary calendar, today + 7 days
+friday-gmail events personal --from 2026-11-10 --to 2026-11-14 --q standup
+friday-gmail events personal --calendar team@group.calendar.google.com --days 30 --max 200
+friday-gmail event personal <eventId>              # one event incl. description
+friday-gmail freebusy personal --from 2026-11-10 --days 5 --calendar primary --calendar team@example.com
+```
+
+- `events` prints one JSON line per event in start order, with recurring events
+  expanded into their occurrences: `id`, `calendar`, `start`, `end` (a date for
+  all-day events, otherwise a date-time with offset), `all_day`, `title`,
+  `location`, `organizer`, `attendees` (email, name, response), `my_response`
+  (`accepted`, `tentative`, `declined`, `needsAction`, or `organizer`), `meet`,
+  `status`, `recurring` and `link`. `event` adds `description`, `recurrence`,
+  `creator`, `created`, `updated`, `visibility` and `attachments`.
+- `--from` and `--to` take `YYYY-MM-DD` (a day in your local time zone; `--to`
+  includes that whole day) or an ISO date-time. Without `--to`, the range is
+  `--days` long (default 7) from `--from` (default: the start of today).
+  `--max` defaults to 100.
+- `freebusy` prints one line per calendar with its busy slots. Repeat
+  `--calendar` for several; the default is `primary`.
+- Tokens authorized before calendar support (0.5.0) only cover Gmail. Mail keeps
+  working with them; calendar commands fail with a message to run `auth-url` and
+  `auth-exchange` again for that account. `auth-exchange` reports
+  `"calendar": true` once the new token covers it.
 
 ### Drafting
 
