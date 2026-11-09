@@ -406,3 +406,111 @@ test("attachments carry contentId and inline, so a signature logo is told from a
     assert.deepEqual(parsed(r)[0].attachments, expected);
   }
 });
+
+// ---------- search --ids and meta ----------
+
+const listPage = (from, n, next) => ({ body: { messages: ids(n, from).map((id) => ({ id, threadId: `t-${id}` })), ...(next ? { nextPageToken: next } : {}) } });
+const metaMessage = (id, extra = {}) => ({
+  id, threadId: `t-${id}`, labelIds: ["INBOX", "UNREAD"], snippet: `snippet of ${id}`,
+  payload: { headers: hdrs({ From: "Alex <alex@example.com>", To: "you@example.com", Cc: "sam@example.com", "Reply-To": "help@example.com", Subject: `Subject ${id}`, Date: `date of ${id}`, "Message-ID": `<${id}@mail.example.com>`, ...extra }) },
+});
+const metaRoute = (id, body) => ({ method: "GET", path: `/messages/${id}$`, responses: [{ body }] });
+const listCalls = (gmail) => gmail.filter((e) => /\/messages\?/.test(e.url)).map((e) => new URL(e.url, "http://x").searchParams);
+const perMessage = (gmail) => gmail.filter((e) => /\/messages\/[^/?]+\?/.test(e.url) || /\/messages\/[^/?]+$/.test(e.url));
+
+test("search --ids prints id and threadId from the list pages, 500 per page, no per-message calls", () => {
+  const list = { method: "GET", path: "/messages$", responses: [listPage(0, 500, "p2"), listPage(500, 500, "p3"), listPage(1000, 200)] };
+  const r = run(["search", "personal", "newer_than:30d", "--max", "5000", "--ids"], [list]);
+  assert.equal(r.code, 0, r.stderr);
+  const lines = parsed(r);
+  assert.equal(lines.length, 1200);
+  assert.deepEqual(lines[0], { id: "m0", threadId: "t-m0" });
+  assert.deepEqual(lines.map((l) => l.id), ids(1200));
+  const calls = listCalls(r.gmail);
+  assert.deepEqual(calls.map((p) => p.get("maxResults")), ["500", "500", "500"]);
+  assert.deepEqual(calls.map((p) => p.get("pageToken")), [null, "p2", "p3"]);
+  assert.ok(calls.every((p) => p.get("q") === "newer_than:30d"));
+  assert.equal(perMessage(r.gmail).length, 0);
+  assert.equal(r.gmail.length, 3);
+});
+
+test("search --ids stops at --max, asking only for what is left", () => {
+  const list = { method: "GET", path: "/messages$", responses: [listPage(0, 500, "p2"), listPage(500, 200, "p3")] };
+  // The query comes first; a flag in its place is a usage error, not a search for "--ids".
+  const r = run(["search", "personal", "--ids", "in:inbox"], [list]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /usage: search .*\[--ids\]/);
+  assert.equal(r.gmail.length, 0);
+  const r2 = run(["search", "personal", "in:inbox", "--ids", "--max", "700"], [list]);
+  assert.equal(r2.code, 0, r2.stderr);
+  assert.equal(parsed(r2).length, 700);
+  assert.deepEqual(listCalls(r2.gmail).map((p) => p.get("maxResults")), ["500", "200"]);
+});
+
+test("search without --ids is unchanged: pages of 100, one metadata call per message", () => {
+  const list = { method: "GET", path: "/messages$", responses: [listPage(0, 2)] };
+  const r = run(["search", "personal", "in:inbox", "--max", "150"], [list, metaRoute("m0", metaMessage("m0")), metaRoute("m1", metaMessage("m1"))]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(listCalls(r.gmail).map((p) => p.get("maxResults")), ["100"]);
+  assert.equal(perMessage(r.gmail).length, 2);
+  assert.deepEqual(parsed(r).map((l) => l.id), ["m0", "m1"]);
+});
+
+test("meta prints exactly the lines search prints, in the order given", () => {
+  const routes = [
+    { method: "GET", path: "/messages$", responses: [listPage(0, 3)] },
+    metaRoute("m0", metaMessage("m0")),
+    metaRoute("m1", metaMessage("m1", { "Message-ID": "" })),
+    metaRoute("m2", metaMessage("m2")),
+  ];
+  const s = run(["search", "personal", "in:inbox"], routes);
+  const m = run(["meta", "personal", "m2", "m0", "m1"], routes);
+  assert.equal(s.code, 0, s.stderr);
+  assert.equal(m.code, 0, m.stderr);
+  const byId = Object.fromEntries(parsed(s).map((l) => [l.id, l]));
+  const lines = parsed(m);
+  assert.deepEqual(lines.map((l) => l.id), ["m2", "m0", "m1"]);
+  for (const l of lines) assert.deepEqual(l, byId[l.id]);
+  assert.deepEqual(Object.keys(lines[0]), ["id", "threadId", "from", "to", "cc", "reply_to", "subject", "date", "labels", "snippet", "link"]);
+  assert.equal(lines[0].reply_to, "help@example.com");
+  assert.equal(lines[0].link, "https://mail.google.com/mail/?authuser=you@example.com#search/rfc822msgid:m2%40mail.example.com");
+  assert.equal(lines[2].link, "https://mail.google.com/mail/?authuser=you@example.com#all/m1");
+  // one format=metadata GET per id, nothing else
+  assert.deepEqual(m.gmail.map((e) => [e.method, e.url.split("?")[0]]), [
+    ["GET", "/gmail/v1/users/me/messages/m2"], ["GET", "/gmail/v1/users/me/messages/m0"], ["GET", "/gmail/v1/users/me/messages/m1"],
+  ]);
+  assert.ok(m.gmail.every((e) => e.url.includes("format=metadata")));
+});
+
+test("meta skips an id that no longer exists, says so on stderr, and exits 0", () => {
+  const gone = { status: 404, body: { error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" } } };
+  const invalid = { status: 400, body: { error: { code: 400, message: "Invalid id value", status: "INVALID_ARGUMENT" } } };
+  const r = run(["meta", "personal", "m0", "gone1", "m1", "bad id"], [
+    metaRoute("m0", metaMessage("m0")),
+    metaRoute("m1", metaMessage("m1")),
+    { method: "GET", path: "/messages/gone1$", responses: [gone] },
+    { method: "GET", path: "/messages/bad%20id$", responses: [invalid] },
+  ]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(parsed(r).map((l) => l.id), ["m0", "m1"]);
+  assert.match(r.stderr, /meta: message gone1 not found in personal, skipped/);
+  assert.match(r.stderr, /meta: message bad id not found in personal, skipped/);
+  assert.equal(r.gmail.length, 4);
+});
+
+test("meta retries rate limits and still fails on other errors", () => {
+  const r = run(["meta", "personal", "m0"], [{ method: "GET", path: "/messages/m0$", responses: [rateLimit403(), { body: metaMessage("m0") }] }]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.sleeps.length, 1);
+  assert.equal(parsed(r)[0].id, "m0");
+  const e = run(["meta", "personal", "m0", "m1"], [{ method: "GET", path: "/messages/m0$", responses: [{ status: 500, body: { error: { code: 500, message: "Backend Error" } } }] }]);
+  assert.notEqual(e.code, 0);
+  assert.match(e.stderr, /500/);
+  assert.equal(e.gmail.length, 1);
+});
+
+test("meta without ids prints usage and fails", () => {
+  const r = run(["meta", "personal"], []);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /usage: meta \[account\] <msgId\.\.\.>/);
+});

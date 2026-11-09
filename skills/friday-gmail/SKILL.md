@@ -34,6 +34,11 @@ never suggest adding one, and never present a created draft as "sent".
   labels, snippet, deep link.
 - `search [account] <gmail-query> [--max N]` — full Gmail query syntax
   (`from:x newer_than:7d has:attachment` etc.).
+- `search ... --ids` prints only `{id, threadId}` per message (500 per
+  request, no per-message fetch); `meta [account] <msgId...>` prints the full
+  search line for given ids, in order, skipping (with a stderr note) any that no
+  longer exist. Use the pair for large listings where you already know most
+  messages: it avoids rate limits.
 - `get [account] <msgId> [--html]`: from/to/cc/reply_to + text body +
   attachment metadata; `--html` adds the raw HTML part (e.g. to see how a
   human reformatted a draft). `inbox` and `search` lines carry `cc` and

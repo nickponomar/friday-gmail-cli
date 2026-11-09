@@ -24,7 +24,11 @@
 //   accounts                      list account keys and which have tokens
 //   count                         inbox message/thread/unread counts per account
 //   inbox [account] [--max N]     inbox messages as JSON lines (metadata incl. cc/reply_to + snippet)
-//   search [account] <q> [--max N]  all-mail search (Gmail query syntax) as JSON lines
+//   search [account] <q> [--max N] [--ids]  all-mail search (Gmail query syntax) as
+//                                 JSON lines; --ids prints only {id, threadId} from the
+//                                 list pages (500 per request, no per-message fetch)
+//   meta [account] <msgId...>     the search line for each id, in order; a missing
+//                                 id is skipped with a note on stderr
 //   get [account] <msgId> [--html]  full message: from/to/cc/reply_to, text body,
 //                                 attachments; --html adds the raw HTML part
 //   thread [account] <threadId> [--html] [--all]  every message of a conversation,
@@ -336,8 +340,8 @@ function rateLimitReason(status, text) {
 }
 
 // opts.notFound: the message to die with on a 404 (or a 400 for a malformed
-// id) instead of the raw API error.
-async function api(key, path, { notFound, ...opts } = {}) {
+// id) instead of the raw API error. opts.missingOk: return null on those instead.
+async function api(key, path, { notFound, missingOk, ...opts } = {}) {
   const token = await accessToken(key);
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
@@ -351,7 +355,10 @@ async function api(key, path, { notFound, ...opts } = {}) {
     });
     const text = await res.text();
     if (res.ok) return text ? JSON.parse(text) : null;
-    if (notFound && (res.status === 404 || res.status === 400)) die(`${notFound} (${res.status})`);
+    if (res.status === 404 || res.status === 400) {
+      if (missingOk) return null;
+      if (notFound) die(`${notFound} (${res.status})`);
+    }
     // A rate-limited request was rejected, not executed, so retrying is safe
     // for POSTs too.
     const reason = rateLimitReason(res.status, text);
@@ -456,39 +463,59 @@ async function cmdInbox(key, args) {
   } while (pageToken && fetched < max);
 }
 
+const SEARCH_METADATA = "format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID";
+
+// The JSON line `search` and `meta` print for one format=metadata message.
+function searchLine(key, m) {
+  // Deep link that opens the right account and exact message in Gmail web/app.
+  const mid = header(m, "Message-ID").replace(/^<|>$/g, "");
+  return JSON.stringify({
+    id: m.id,
+    threadId: m.threadId,
+    from: header(m, "From"),
+    to: header(m, "To"),
+    cc: header(m, "Cc"),
+    reply_to: header(m, "Reply-To"),
+    subject: header(m, "Subject"),
+    date: header(m, "Date"),
+    labels: m.labelIds ?? [],
+    snippet: m.snippet ?? "",
+    link: mid ? `https://mail.google.com/mail/?authuser=${account(key).email}#search/rfc822msgid:${encodeURIComponent(mid)}` : `https://mail.google.com/mail/?authuser=${account(key).email}#all/${m.id}`,
+  });
+}
+
+// --ids: just {id, threadId} straight from the list pages (500 per page, the
+// API maximum), no request per message. Callers that cache metadata use this
+// plus `meta` for the ids they have not seen.
 async function cmdSearch(key, args) {
   const q = args[0];
-  if (!q || q.startsWith("--")) die("usage: search [account] <gmail-query> [--max N]");
+  if (!q || q.startsWith("--")) die("usage: search [account] <gmail-query> [--max N] [--ids]");
+  const idsOnly = args.includes("--ids");
   const maxIdx = args.indexOf("--max");
   const max = maxIdx >= 0 ? Number(args[maxIdx + 1]) : 25;
   let pageToken;
   let fetched = 0;
   do {
-    const params = new URLSearchParams({ q, maxResults: String(Math.min(max - fetched, 100)) });
+    const params = new URLSearchParams({ q, maxResults: String(Math.min(max - fetched, idsOnly ? 500 : 100)) });
     if (pageToken) params.set("pageToken", pageToken);
     const page = await api(key, `messages?${params}`);
-    for (const { id } of page.messages ?? []) {
-      const m = await api(key, `messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Reply-To&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID`);
-      const mid = header(m, "Message-ID").replace(/^<|>$/g, "");
-      console.log(
-        JSON.stringify({
-          id: m.id,
-          threadId: m.threadId,
-          from: header(m, "From"),
-          to: header(m, "To"),
-          cc: header(m, "Cc"),
-          reply_to: header(m, "Reply-To"),
-          subject: header(m, "Subject"),
-          date: header(m, "Date"),
-          labels: m.labelIds ?? [],
-          snippet: m.snippet ?? "",
-          link: mid ? `https://mail.google.com/mail/?authuser=${account(key).email}#search/rfc822msgid:${encodeURIComponent(mid)}` : `https://mail.google.com/mail/?authuser=${account(key).email}#all/${m.id}`,
-        })
-      );
+    for (const { id, threadId } of page.messages ?? []) {
+      if (fetched >= max) break;
+      console.log(idsOnly ? JSON.stringify({ id, threadId }) : searchLine(key, await api(key, `messages/${id}?${SEARCH_METADATA}`)));
       fetched++;
     }
     pageToken = page.nextPageToken;
   } while (pageToken && fetched < max);
+}
+
+// The search line for each id, in the order given. An id that no longer exists
+// (deleted, or never valid) is skipped with a note on stderr.
+async function cmdMeta(key, ids) {
+  for (const id of ids) {
+    const m = await api(key, `messages/${encodeURIComponent(id)}?${SEARCH_METADATA}`, { missingOk: true });
+    if (m) console.log(searchLine(key, m));
+    else console.error(`friday-gmail: meta: message ${id} not found in ${key}, skipped`);
+  }
 }
 
 function walkParts(payload, out) {
@@ -790,8 +817,12 @@ else if (cmd === "inbox") {
   const [key, rest] = takeAccount(args, "inbox [account] [--max N]");
   await cmdInbox(key, rest);
 } else if (cmd === "search") {
-  const [key, rest] = takeAccount(args, "search [account] <gmail-query> [--max N]");
+  const [key, rest] = takeAccount(args, "search [account] <gmail-query> [--max N] [--ids]");
   await cmdSearch(key, rest);
+} else if (cmd === "meta") {
+  const [key, ids] = takeAccount(args, "meta [account] <msgId...>");
+  if (!ids.length) die("usage: meta [account] <msgId...>");
+  await cmdMeta(key, ids);
 } else if (cmd === "get") {
   const [key, rest] = takeAccount(args, "get [account] <msgId> [--html]");
   const withHtml = rest.includes("--html");
@@ -869,5 +900,5 @@ else if (cmd === "inbox") {
     console.log(`unlabeled ${await batchModify(key, ids, { removeLabelIds: [id] })}`);
   }
 } else {
-  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | thread | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");
+  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | meta | get | thread | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");
 }
