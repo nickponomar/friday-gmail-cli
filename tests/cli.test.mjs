@@ -236,3 +236,173 @@ test("other errors are not retried", () => {
     assert.equal(r.sleeps.length, 0);
   }
 });
+
+// ---------- thread and get ----------
+
+const b64 = (s) => Buffer.from(s).toString("base64url");
+const hdrs = (o) => Object.entries(o).map(([name, value]) => ({ name, value }));
+// A format=full message: text + HTML alternative, plus optional attachment parts.
+function fullMessage(id, { internalDate, labels = ["INBOX"], from = "alex@example.com", subject = "Plans", text = `body of ${id}`, parts = [] }) {
+  return {
+    id, threadId: "t1", labelIds: labels, internalDate: String(internalDate),
+    payload: {
+      mimeType: "multipart/mixed",
+      headers: hdrs({ From: from, To: "you@example.com", Cc: "sam@example.com", Subject: subject, Date: `date of ${id}` }),
+      parts: [
+        { mimeType: "multipart/alternative", parts: [
+          { mimeType: "text/plain", body: { data: b64(text) } },
+          { mimeType: "text/html", body: { data: b64(`<p>${text}</p>`) } },
+        ] },
+        ...parts,
+      ],
+    },
+  };
+}
+const LOGO = {
+  mimeType: "image/png", filename: "logo.png", body: { attachmentId: "att-logo", size: 1200 },
+  headers: hdrs({ "Content-Type": "image/png", "Content-ID": "<logo@example.com>", "Content-Disposition": 'inline; filename="logo.png"' }),
+};
+const PDF = {
+  mimeType: "application/pdf", filename: "invoice.pdf", body: { attachmentId: "att-pdf", size: 54321 },
+  headers: hdrs({ "Content-Type": "application/pdf", "Content-Disposition": 'attachment; filename="invoice.pdf"' }),
+};
+// No Content-Disposition at all, but referenced by Content-Id (lower-case "d").
+const CID_ONLY = {
+  mimeType: "image/jpeg", filename: "photo.jpg", body: { attachmentId: "att-photo", size: 900 },
+  headers: hdrs({ "Content-Type": "image/jpeg", "Content-Id": "<ii_photo1>" }),
+};
+// How Gmail sends an ordinary attachment: a Content-ID, but disposition attachment.
+const GMAIL_PDF = {
+  mimeType: "application/pdf", filename: "contract.pdf", body: { attachmentId: "att-contract", size: 7000 },
+  headers: hdrs({ "Content-Type": "application/pdf", "Content-Disposition": 'attachment; filename="contract.pdf"', "Content-ID": "<f_abc123>", "X-Attachment-Id": "f_abc123" }),
+};
+// Inline disposition without a Content-ID.
+const INLINE_NO_CID = {
+  mimeType: "image/gif", filename: "smile.gif", body: { attachmentId: "att-gif", size: 50 },
+  headers: hdrs({ "Content-Type": "image/gif", "Content-Disposition": "INLINE" }),
+};
+
+// The API order is deliberately scrambled; internalDate decides.
+const THREAD_MESSAGES = [
+  fullMessage("m2", { internalDate: 2000, from: "you@example.com", subject: "Re: Plans" }),
+  fullMessage("m4", { internalDate: 4000, labels: ["SPAM"], from: "spam@example.com" }),
+  fullMessage("m1", { internalDate: 1000, parts: [PDF, LOGO] }),
+  fullMessage("m3", { internalDate: 3000, labels: ["TRASH", "Label_7"], subject: "Re: Plans" }),
+  fullMessage("m5", { internalDate: 5000, labels: ["INBOX", "UNREAD"], subject: "Re: Plans" }),
+];
+const threadRoute = (messages = THREAD_MESSAGES) => ({ method: "GET", path: "/threads/t1$", responses: [{ body: { id: "t1", messages } }] });
+const parsed = (r) => r.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+
+test("thread prints one line per message, oldest first, leaving out Trash and Spam", () => {
+  const r = run(["thread", "personal", "t1"], [threadRoute()]);
+  assert.equal(r.code, 0, r.stderr);
+  const lines = parsed(r);
+  assert.deepEqual(lines.map((m) => m.id), ["m1", "m2", "m5"]);
+  assert.deepEqual(r.gmail.map((e) => e.url), ["/gmail/v1/users/me/threads/t1?format=full"]);
+});
+
+test("thread --all includes Trash and Spam, still oldest first", () => {
+  const r = run(["thread", "personal", "t1", "--all"], [threadRoute()]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(parsed(r).map((m) => m.id), ["m1", "m2", "m3", "m4", "m5"]);
+});
+
+test("thread lines have exactly the shape get prints", () => {
+  const routes = [threadRoute(), { method: "GET", path: "/messages/m1$", responses: [{ body: THREAD_MESSAGES[2] }] }];
+  const t = run(["thread", "personal", "t1"], routes);
+  const g = run(["get", "personal", "m1"], routes);
+  assert.equal(t.code, 0, t.stderr);
+  assert.equal(g.code, 0, g.stderr);
+  const first = parsed(t)[0];
+  assert.deepEqual(first, parsed(g)[0]);
+  assert.deepEqual(Object.keys(first), ["id", "threadId", "from", "to", "cc", "reply_to", "subject", "date", "labels", "body", "attachments"]);
+  assert.equal(first.from, "alex@example.com");
+  assert.equal(first.cc, "sam@example.com");
+  assert.equal(first.body, "body of m1");
+  assert.deepEqual(parsed(t)[2].labels, ["INBOX", "UNREAD"]);
+});
+
+test("thread --html adds the html field to every message, like get --html", () => {
+  const routes = [threadRoute(), { method: "GET", path: "/messages/m1$", responses: [{ body: THREAD_MESSAGES[2] }] }];
+  const t = run(["thread", "personal", "--html", "t1"], routes);
+  assert.equal(t.code, 0, t.stderr);
+  const lines = parsed(t);
+  assert.deepEqual(lines.map((m) => m.html), ["<p>body of m1</p>", "<p>body of m2</p>", "<p>body of m5</p>"]);
+  assert.deepEqual(lines[0], parsed(run(["get", "personal", "m1", "--html"], routes))[0]);
+  assert.ok(parsed(run(["thread", "personal", "t1"], routes)).every((m) => !("html" in m)));
+});
+
+test("thread caps body and html like get", () => {
+  const big = fullMessage("m9", { internalDate: 1, text: "x".repeat(150_000) });
+  const r = run(["thread", "personal", "t1", "--html"], [threadRoute([big])]);
+  assert.equal(r.code, 0, r.stderr);
+  const [m] = parsed(r);
+  assert.equal(m.body.length, 20_000);
+  assert.equal(m.html.length, 100_000);
+});
+
+test("thread makes no modifying API calls: one GET, no UNREAD removal", () => {
+  const r = run(["thread", "personal", "t1", "--all", "--html"], [threadRoute(), LABELS, BATCH_OK]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.ok(r.gmail.length > 0);
+  for (const e of r.gmail) {
+    assert.equal(e.method, "GET", e.url);
+    assert.equal(e.body, null);
+    assert.doesNotMatch(e.url, /modify|trash|untrash|labels/);
+  }
+});
+
+test("thread whose messages are all in Trash prints nothing, says why, and exits 0", () => {
+  const msgs = [fullMessage("m3", { internalDate: 3000, labels: ["TRASH"] })];
+  const r = run(["thread", "personal", "t1"], [threadRoute(msgs)]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /all 1 messages of thread t1 are in Trash or Spam; pass --all/);
+});
+
+test("an unknown thread exits non-zero with a clear message", () => {
+  const notFound = { status: 404, body: { error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" } } };
+  const r = run(["thread", "work", "t404"], [{ method: "GET", path: "/threads/t404$", responses: [notFound] }]);
+  assert.notEqual(r.code, 0);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /thread t404: not found in work \(you@work\.example\.com\) \(404\)/);
+  const bad = { status: 400, body: { error: { code: 400, message: "Invalid id value", status: "INVALID_ARGUMENT" } } };
+  const r2 = run(["thread", "personal", "nope"], [{ method: "GET", path: "/threads/nope$", responses: [bad] }]);
+  assert.notEqual(r2.code, 0);
+  assert.match(r2.stderr, /thread nope: not found in personal .*\(400\)/);
+});
+
+test("thread retries a rate limit like search and get", () => {
+  const r = run(["thread", "personal", "t1"], [{ method: "GET", path: "/threads/t1$", responses: [rateLimit403(), rateLimit403(), { body: { id: "t1", messages: THREAD_MESSAGES } }] }]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.gmail.length, 3);
+  assert.equal(r.sleeps.length, 2);
+  assert.match(r.stderr, /rate limited \(rateLimitExceeded\) on threads\/t1, retry 1\/7/);
+  assert.deepEqual(parsed(r).map((m) => m.id), ["m1", "m2", "m5"]);
+});
+
+test("thread without exactly one id prints usage and fails", () => {
+  for (const args of [["thread", "personal"], ["thread", "personal", "t1", "t2"]]) {
+    const r = run(args, []);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /usage: thread \[account\] <threadId> \[--html\] \[--all\]/);
+    assert.equal(r.gmail.length, 0);
+  }
+});
+
+test("attachments carry contentId and inline, so a signature logo is told from a file", () => {
+  const m = fullMessage("m7", { internalDate: 1, parts: [PDF, LOGO, CID_ONLY, INLINE_NO_CID, GMAIL_PDF] });
+  const routes = [threadRoute([m]), { method: "GET", path: "/messages/m7$", responses: [{ body: m }] }];
+  const expected = [
+    { filename: "invoice.pdf", mimeType: "application/pdf", size: 54321, attachmentId: "att-pdf", contentId: "", inline: false },
+    { filename: "logo.png", mimeType: "image/png", size: 1200, attachmentId: "att-logo", contentId: "logo@example.com", inline: true },
+    { filename: "photo.jpg", mimeType: "image/jpeg", size: 900, attachmentId: "att-photo", contentId: "ii_photo1", inline: true },
+    { filename: "smile.gif", mimeType: "image/gif", size: 50, attachmentId: "att-gif", contentId: "", inline: true },
+    { filename: "contract.pdf", mimeType: "application/pdf", size: 7000, attachmentId: "att-contract", contentId: "f_abc123", inline: false },
+  ];
+  for (const args of [["get", "personal", "m7"], ["thread", "personal", "t1"]]) {
+    const r = run(args, routes);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(parsed(r)[0].attachments, expected);
+  }
+});

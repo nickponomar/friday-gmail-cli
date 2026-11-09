@@ -38,6 +38,13 @@ never suggest adding one, and never present a created draft as "sent".
   attachment metadata; `--html` adds the raw HTML part (e.g. to see how a
   human reformatted a draft). `inbox` and `search` lines carry `cc` and
   `reply_to` too.
+- `thread [account] <threadId> [--html] [--all]`: the whole conversation, one
+  `get`-shaped JSON line per message, oldest first; Trash and Spam messages are
+  left out unless `--all`. Read-only, marks nothing as read. Use it to read
+  the full back-and-forth before drafting a reply.
+- Attachments (in `get` and `thread`) carry `contentId` and `inline`: an
+  `inline: true` part is an image shown in the body (signature logo, pasted
+  screenshot), not a file the sender attached.
 - `attachment [account] <msgId> <attachmentId> <outPath>` — download.
 - `draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attach...]`
 - `drafts [account] [--max N]` / `draft-discard [account] <draftId>` — list or

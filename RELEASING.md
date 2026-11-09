@@ -41,6 +41,7 @@ so a release is never a side effect of merging a feature.
    node gmail.js search <acct> 'newer_than:7d' --max 5      # cc, reply_to on each line
    node gmail.js get <acct> <msgId>                          # cc, reply_to
    node gmail.js get <acct> <msgId> --html                   # plus html
+   node gmail.js thread <acct> <threadId>                    # oldest first, get-shaped lines
    node gmail.js draft <acct> reply-no-cc.txt --reply <msgId>    # warns, not_included
    node gmail.js draft <acct> reply-with-cc.txt --reply <msgId>  # silent
    node gmail.js draft <acct> formatting.txt --sig sig.html      # open it in Gmail

@@ -117,6 +117,8 @@ friday-gmail inbox personal --max 20       # inbox as JSON lines
 friday-gmail search personal 'from:amazon newer_than:7d'
 friday-gmail get personal 18c2a4b7d3e5f601     # incl. cc and reply_to
 friday-gmail get personal 18c2a4b7d3e5f601 --html  # plus the raw HTML part
+friday-gmail thread personal 18c2a4b7d3e5f600   # whole conversation, oldest first
+friday-gmail thread personal 18c2a4b7d3e5f600 --html --all  # incl. HTML, Trash and Spam
 friday-gmail attachment personal <msgId> <attachmentId> ./invoice.pdf
 
 friday-gmail drafts personal               # list unsent drafts
@@ -135,6 +137,20 @@ label and never creates it; if no label by that name exists it prints
 `unlabeled 0: no label "..." in <account>` and exits 0. Both send the ids in
 batches of up to 1000 (one `messages.batchModify` call each), so passing
 hundreds of ids costs a few requests, and both work on messages in Trash.
+
+`thread` prints every message of a conversation (the `threadId` on `inbox`,
+`search` and `get` lines) as one JSON line each, oldest first, in exactly the
+shape `get` prints. Messages in Trash or Spam are left out unless you pass
+`--all`. It only reads: no labels change and nothing is marked as read.
+
+Each attachment in `get` and `thread` output has `filename`, `mimeType`,
+`size`, `attachmentId`, `contentId` (the `Content-ID` header without the angle
+brackets, or `""`) and `inline`. `inline` is true when the part is
+`Content-Disposition: inline`, or has a Content-ID and no disposition; an
+explicit `attachment` disposition wins, because Gmail gives every ordinary
+attachment a Content-ID too. Inline parts are images shown in the body, such as
+a signature logo the HTML references as `cid:<contentId>`, rather than files
+someone attached.
 
 ### Drafting
 

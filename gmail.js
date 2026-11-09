@@ -27,6 +27,9 @@
 //   search [account] <q> [--max N]  all-mail search (Gmail query syntax) as JSON lines
 //   get [account] <msgId> [--html]  full message: from/to/cc/reply_to, text body,
 //                                 attachments; --html adds the raw HTML part
+//   thread [account] <threadId> [--html] [--all]  every message of a conversation,
+//                                 oldest first, one `get`-shaped JSON line each;
+//                                 Trash/Spam left out unless --all. Read-only.
 //   attachment [account] <msgId> <attachmentId> <outPath>
 //   draft [account] <emailFile> [--sig <htmlFile>] [--reply <msgId>] [attachmentPath...]
 //                                 create an UNSENT draft; --reply <msgId> threads it
@@ -332,7 +335,9 @@ function rateLimitReason(status, text) {
   }
 }
 
-async function api(key, path, opts = {}) {
+// opts.notFound: the message to die with on a 404 (or a 400 for a malformed
+// id) instead of the raw API error.
+async function api(key, path, { notFound, ...opts } = {}) {
   const token = await accessToken(key);
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
@@ -346,6 +351,7 @@ async function api(key, path, opts = {}) {
     });
     const text = await res.text();
     if (res.ok) return text ? JSON.parse(text) : null;
+    if (notFound && (res.status === 404 || res.status === 400)) die(`${notFound} (${res.status})`);
     // A rate-limited request was rejected, not executed, so retrying is safe
     // for POSTs too.
     const reason = rateLimitReason(res.status, text);
@@ -489,7 +495,15 @@ function walkParts(payload, out) {
   if (!payload) return;
   const { mimeType, body, parts, filename } = payload;
   if (filename && body?.attachmentId) {
-    out.attachments.push({ filename, mimeType, size: body.size, attachmentId: body.attachmentId });
+    // Inline parts (a signature logo, a pasted screenshot) carry a Content-ID the
+    // HTML references as cid:...; a client shows those in the body, not as files.
+    // An explicit "attachment" disposition still wins: Gmail gives every ordinary
+    // attachment a Content-ID (<f_...>) too.
+    const partHeader = (name) => payload.headers?.find((h) => h.name.toLowerCase() === name)?.value ?? "";
+    const contentId = partHeader("content-id").trim().replace(/^<|>$/g, "");
+    const disposition = partHeader("content-disposition").trim().split(";")[0].trim().toLowerCase();
+    const inline = disposition === "inline" || (disposition !== "attachment" && contentId !== "");
+    out.attachments.push({ filename, mimeType, size: body.size, attachmentId: body.attachmentId, contentId, inline });
   } else if (mimeType === "text/plain" && body?.data) {
     out.text += decodeB64url(body.data).toString("utf8");
   } else if (mimeType === "text/html" && body?.data) {
@@ -572,29 +586,48 @@ function bodyToHtml(body) {
   return out.join("\n");
 }
 
-async function cmdGet(key, msgId, withHtml) {
-  const m = await api(key, `messages/${msgId}?format=full`);
+// One format=full message as the JSON line `get` and `thread` print.
+function messageLine(m, withHtml) {
   const out = { text: "", html: "", attachments: [] };
   walkParts(m.payload, out);
   // Prefer plain text; fall back to crudely de-tagged HTML.
   const body = out.text || out.html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  console.log(
-    JSON.stringify({
-      id: m.id,
-      threadId: m.threadId,
-      from: header(m, "From"),
-      to: header(m, "To"),
-      cc: header(m, "Cc"),
-      reply_to: header(m, "Reply-To"),
-      subject: header(m, "Subject"),
-      date: header(m, "Date"),
-      labels: m.labelIds ?? [],
-      body: body.slice(0, 20_000),
-      // --html: the raw HTML part too, e.g. to see how a human reformatted a draft.
-      html: withHtml ? out.html.slice(0, 100_000) : undefined,
-      attachments: out.attachments,
-    })
-  );
+  return JSON.stringify({
+    id: m.id,
+    threadId: m.threadId,
+    from: header(m, "From"),
+    to: header(m, "To"),
+    cc: header(m, "Cc"),
+    reply_to: header(m, "Reply-To"),
+    subject: header(m, "Subject"),
+    date: header(m, "Date"),
+    labels: m.labelIds ?? [],
+    body: body.slice(0, 20_000),
+    // --html: the raw HTML part too, e.g. to see how a human reformatted a draft.
+    html: withHtml ? out.html.slice(0, 100_000) : undefined,
+    attachments: out.attachments,
+  });
+}
+
+async function cmdGet(key, msgId, withHtml) {
+  console.log(messageLine(await api(key, `messages/${msgId}?format=full`), withHtml));
+}
+
+// A whole conversation, oldest message first. threads.get is a plain read: it
+// changes no labels and does not mark anything as read.
+async function cmdThread(key, threadId, withHtml, all) {
+  const t = await api(key, `threads/${encodeURIComponent(threadId)}?format=full`, {
+    notFound: `thread ${threadId}: not found in ${key} (${ACCOUNTS[key].email})`,
+  });
+  const messages = (t.messages ?? [])
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => Number(a.m.internalDate ?? 0) - Number(b.m.internalDate ?? 0) || a.i - b.i)
+    .map(({ m }) => m);
+  const shown = all ? messages : messages.filter((m) => !(m.labelIds ?? []).some((l) => l === "TRASH" || l === "SPAM"));
+  for (const m of shown) console.log(messageLine(m, withHtml));
+  if (messages.length && !shown.length) {
+    console.error(`friday-gmail: all ${messages.length} messages of thread ${threadId} are in Trash or Spam; pass --all to show them`);
+  }
 }
 
 async function cmdAttachment(key, msgId, attachmentId, outPath) {
@@ -764,6 +797,12 @@ else if (cmd === "inbox") {
   const withHtml = rest.includes("--html");
   const ids = rest.filter((a) => a !== "--html");
   await cmdGet(key, ids[0] ?? die("usage: get [account] <msgId> [--html]"), withHtml);
+} else if (cmd === "thread") {
+  const usage = "thread [account] <threadId> [--html] [--all]";
+  const [key, rest] = takeAccount(args, usage);
+  const ids = rest.filter((a) => a !== "--html" && a !== "--all");
+  if (ids.length !== 1) die(`usage: ${usage}`);
+  await cmdThread(key, ids[0], rest.includes("--html"), rest.includes("--all"));
 } else if (cmd === "attachment") {
   const [key, rest] = takeAccount(args, "attachment [account] <msgId> <attachmentId> <outPath>");
   await cmdAttachment(key, rest[0], rest[1], rest[2]);
@@ -830,5 +869,5 @@ else if (cmd === "inbox") {
     console.log(`unlabeled ${await batchModify(key, ids, { removeLabelIds: [id] })}`);
   }
 } else {
-  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");
+  die("usage: accounts | count | auth-url | auth-exchange | inbox | search | get | thread | attachment | draft | drafts | draft-discard | archive | trash | restore | label | unlabel (no send, by design)");
 }
