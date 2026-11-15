@@ -514,3 +514,24 @@ test("meta without ids prints usage and fails", () => {
   assert.notEqual(r.code, 0);
   assert.match(r.stderr, /usage: meta \[account\] <msgId\.\.\.>/);
 });
+
+// Without an IPv6 route, Node's default 250 ms per connection attempt made busy
+// moments fail with ETIMEDOUT + EHOSTUNREACH although Gmail was reachable.
+function attemptTimeout(nodeOptions) {
+  const probe = "data:text/javascript," + encodeURIComponent(
+    'import net from "node:net"; process.on("exit", () => process.stderr.write("timeout=" + net.getDefaultAutoSelectFamilyAttemptTimeout()));');
+  const r = spawnSync(process.execPath, ["--import", probe, CLI, "--version"], {
+    encoding: "utf8",
+    env: { PATH: process.env.PATH, ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}) },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stderr.match(/timeout=(\d+)/)?.[1];
+}
+
+test("each connection attempt gets two seconds, so the IPv4 fallback does not time out", () => {
+  assert.equal(attemptTimeout(), "2000");
+});
+
+test("an explicit NODE_OPTIONS setting for the attempt timeout is left alone", () => {
+  assert.equal(attemptTimeout("--network-family-autoselection-attempt-timeout=500"), "500");
+});
