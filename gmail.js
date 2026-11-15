@@ -69,6 +69,16 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
+import net from "node:net";
+
+// On a network without an IPv6 route, Node tries IPv6 (fails at once) and then
+// IPv4, but gives each attempt only 250 ms by default. A connect that takes a
+// little longer, e.g. while several commands run in parallel, then fails with
+// ETIMEDOUT + EHOSTUNREACH although Gmail is reachable. Two seconds instead
+// (Node >= 18.18; an explicit NODE_OPTIONS setting still wins).
+if (!/network-family-autoselection-attempt-timeout/.test(process.env.NODE_OPTIONS ?? "")) {
+  net.setDefaultAutoSelectFamilyAttemptTimeout?.(2000);
+}
 
 function die(msg) {
   console.error(`friday-gmail: ${msg}`);
