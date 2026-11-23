@@ -139,6 +139,8 @@ label and never creates it; if no label by that name exists it prints
 `unlabeled 0: no label "..." in <account>` and exits 0. Both send the ids in
 batches of up to 1000 (one `messages.batchModify` call each), so passing
 hundreds of ids costs a few requests, and both work on messages in Trash.
+`archive` batches the same way; `trash` and `restore` batch their label change
+and make one Trash or untrash request per message (Gmail has no batch form).
 
 `search --ids` prints only `{"id", "threadId"}` per message, straight from the
 list pages (500 per request) with no request per message, so listing 2,000

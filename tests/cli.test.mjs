@@ -58,6 +58,59 @@ const rateLimit403 = (reason = "rateLimitExceeded") => ({
   body: { error: { code: 403, message: "Quota exceeded", errors: [{ domain: "usageLimits", reason, message: "Quota exceeded" }], status: "PERMISSION_DENIED" } },
 });
 
+// ---------- archive, trash, restore ----------
+
+const PREFIX_LABELS = {
+  method: "GET",
+  path: "/labels$",
+  responses: [{ body: { labels: [
+    { id: "INBOX", name: "INBOX" },
+    { id: "Label_A", name: "friday/archived" },
+    { id: "Label_T", name: "friday/trashed" },
+  ] } }],
+};
+const OK = (path) => ({ method: "POST", path, responses: [{ body: {} }] });
+const callsTo = (gmail, verb) => gmail.filter((e) => new RegExp(`/messages/[^/]+/${verb}$`).test(e.url));
+
+test("archive moves a whole conversation in one batchModify, not one modify per message", () => {
+  const r = run(["archive", "personal", "m1", "m2", "m3"], [PREFIX_LABELS, BATCH_OK]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "archived 3");
+  assert.deepEqual(r.gmail.map((e) => `${e.method} ${e.url}`), [
+    "GET /gmail/v1/users/me/labels",
+    "POST /gmail/v1/users/me/messages/batchModify",
+  ]);
+  const [b] = batchCalls(r.gmail);
+  assert.deepEqual(b.body, { ids: ["m1", "m2", "m3"], addLabelIds: ["Label_A"], removeLabelIds: ["INBOX"] });
+});
+
+test("archive sends 2500 ids in three requests", () => {
+  const r = run(["archive", "personal", ...ids(2500)], [PREFIX_LABELS, BATCH_OK]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body.ids.length), [1000, 1000, 500]);
+  assert.equal(callsTo(r.gmail, "modify").length, 0);
+});
+
+test("trash labels in one batchModify, then moves each message to Trash", () => {
+  const r = run(["trash", "personal", "m1", "m2"], [PREFIX_LABELS, BATCH_OK, OK("/messages/[^/]+/trash$")]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "trashed 2");
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body), [{ ids: ["m1", "m2"], addLabelIds: ["Label_T"] }]);
+  assert.deepEqual(callsTo(r.gmail, "trash").map((e) => e.url), [
+    "/gmail/v1/users/me/messages/m1/trash", "/gmail/v1/users/me/messages/m2/trash"]);
+  assert.equal(callsTo(r.gmail, "modify").length, 0);
+});
+
+test("restore untrashes each message, then puts them all back in one batchModify", () => {
+  const r = run(["restore", "personal", "m1", "m2"], [PREFIX_LABELS, BATCH_OK, OK("/messages/[^/]+/untrash$")]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "restored 2");
+  assert.equal(callsTo(r.gmail, "untrash").length, 2);
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body),
+    [{ ids: ["m1", "m2"], addLabelIds: ["INBOX"], removeLabelIds: ["Label_T", "Label_A"] }]);
+  assert.equal(callsTo(r.gmail, "modify").length, 0);
+});
+
 // ---------- unlabel ----------
 
 test("unlabel removes the label in batches of at most 1000 ids", () => {
