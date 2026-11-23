@@ -51,9 +51,9 @@
 //   drafts [account] [--max N]    list unsent drafts (draft id, thread, to, subject)
 //   draft-discard [account] <draftId>  delete an UNSENT draft (sent mail is never
 //                                 deletable here; this only affects drafts)
-//   archive [account] <msgId...>  remove INBOX, add <prefix>/archived
-//   trash [account] <msgId...>    add <prefix>/trashed, move to Trash
-//   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/*
+//   archive [account] <msgId...>  remove INBOX, add <prefix>/archived. Batched.
+//   trash [account] <msgId...>    add <prefix>/trashed (batched), move to Trash
+//   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/* (batched)
 //   label [account] <name> <msgId...>  add a label (created if missing). Batched.
 //   unlabel [account] <name> <msgId...>  remove a label (never created; a missing
 //                                 label is a clean no-op). Batched, works in Trash.
@@ -427,15 +427,6 @@ async function batchModify(key, ids, change) {
     });
   }
   return unique.length;
-}
-
-async function modify(key, msgId, addNames, removeIds) {
-  const addLabelIds = [];
-  for (const n of addNames) addLabelIds.push(await labelId(key, n));
-  await api(key, `messages/${msgId}/modify`, {
-    method: "POST",
-    body: JSON.stringify({ addLabelIds, removeLabelIds: removeIds }),
-  });
 }
 
 async function cmdInbox(key, args) {
@@ -868,24 +859,31 @@ else if (cmd === "inbox") {
   console.log(JSON.stringify({ discarded: rest[0] }));
 } else if (cmd === "archive") {
   const [key, ids] = takeAccount(args, "archive [account] <msgId...>");
-  for (const id of ids) await modify(key, id, [`${LABEL_PREFIX}/archived`], ["INBOX"]);
+  // One batchModify per 1000 ids, not one modify per message: archiving a
+  // conversation of six messages took six requests in a row.
+  if (ids.length) {
+    const archivedId = await labelId(key, `${LABEL_PREFIX}/archived`);
+    await batchModify(key, ids, { addLabelIds: [archivedId], removeLabelIds: ["INBOX"] });
+  }
   console.log(`archived ${ids.length}`);
 } else if (cmd === "trash") {
   const [key, ids] = takeAccount(args, "trash [account] <msgId...>");
-  for (const id of ids) {
-    await modify(key, id, [`${LABEL_PREFIX}/trashed`], []);
-    await api(key, `messages/${id}/trash`, { method: "POST" });
+  // The action label in one batchModify; messages.trash has no batch form.
+  if (ids.length) {
+    const trashedId = await labelId(key, `${LABEL_PREFIX}/trashed`);
+    await batchModify(key, ids, { addLabelIds: [trashedId] });
   }
+  for (const id of ids) await api(key, `messages/${id}/trash`, { method: "POST" });
   console.log(`trashed ${ids.length}`);
 } else if (cmd === "restore") {
   // Undo a trash or archive: pull it back to the inbox and strip the <prefix>/*
   // action labels. untrash is a safe no-op on a message that isn't in Trash.
   const [key, ids] = takeAccount(args, "restore [account] <msgId...>");
-  const trashedId = await labelId(key, `${LABEL_PREFIX}/trashed`);
-  const archivedId = await labelId(key, `${LABEL_PREFIX}/archived`);
-  for (const id of ids) {
-    await api(key, `messages/${id}/untrash`, { method: "POST" });
-    await modify(key, id, ["INBOX"], [trashedId, archivedId]);
+  if (ids.length) {
+    const trashedId = await labelId(key, `${LABEL_PREFIX}/trashed`);
+    const archivedId = await labelId(key, `${LABEL_PREFIX}/archived`);
+    for (const id of ids) await api(key, `messages/${id}/untrash`, { method: "POST" });
+    await batchModify(key, ids, { addLabelIds: ["INBOX"], removeLabelIds: [trashedId, archivedId] });
   }
   console.log(`restored ${ids.length}`);
 } else if (cmd === "label") {
