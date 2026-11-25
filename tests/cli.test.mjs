@@ -91,24 +91,65 @@ test("archive sends 2500 ids in three requests", () => {
   assert.equal(callsTo(r.gmail, "modify").length, 0);
 });
 
-test("trash labels in one batchModify, then moves each message to Trash", () => {
-  const r = run(["trash", "personal", "m1", "m2"], [PREFIX_LABELS, BATCH_OK, OK("/messages/[^/]+/trash$")]);
+const REFUSED_400 = { status: 400, body: { error: { code: 400, message: "Invalid label: TRASH", status: "INVALID_ARGUMENT" } } };
+
+test("trash moves a whole conversation to Trash in one batchModify, not one request per message", () => {
+  const r = run(["trash", "personal", "m1", "m2", "m3"], [PREFIX_LABELS, BATCH_OK]);
   assert.equal(r.code, 0, r.stderr);
-  assert.equal(r.stdout.trim(), "trashed 2");
-  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body), [{ ids: ["m1", "m2"], addLabelIds: ["Label_T"] }]);
-  assert.deepEqual(callsTo(r.gmail, "trash").map((e) => e.url), [
-    "/gmail/v1/users/me/messages/m1/trash", "/gmail/v1/users/me/messages/m2/trash"]);
-  assert.equal(callsTo(r.gmail, "modify").length, 0);
+  assert.equal(r.stdout.trim(), "trashed 3");
+  assert.deepEqual(r.gmail.map((e) => `${e.method} ${e.url}`), [
+    "GET /gmail/v1/users/me/labels",
+    "POST /gmail/v1/users/me/messages/batchModify",
+  ]);
+  assert.deepEqual(batchCalls(r.gmail)[0].body,
+    { ids: ["m1", "m2", "m3"], addLabelIds: ["Label_T", "TRASH"], removeLabelIds: ["INBOX"] });
 });
 
-test("restore untrashes each message, then puts them all back in one batchModify", () => {
-  const r = run(["restore", "personal", "m1", "m2"], [PREFIX_LABELS, BATCH_OK, OK("/messages/[^/]+/untrash$")]);
+test("trash sends 2500 ids in three requests", () => {
+  const r = run(["trash", "personal", ...ids(2500)], [PREFIX_LABELS, BATCH_OK]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body.ids.length), [1000, 1000, 500]);
+  assert.equal(callsTo(r.gmail, "trash").length, 0);
+});
+
+test("trash falls back to one messages.trash per message when Gmail refuses the TRASH label", () => {
+  const batch = { method: "POST", path: "/messages/batchModify$", responses: [REFUSED_400, { status: 204 }] };
+  const r = run(["trash", "personal", "m1", "m2", "m1"], [PREFIX_LABELS, batch, OK("/messages/[^/]+/trash$")]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "trashed 3");
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body), [
+    { ids: ["m1", "m2"], addLabelIds: ["Label_T", "TRASH"], removeLabelIds: ["INBOX"] },
+    { ids: ["m1", "m2"], addLabelIds: ["Label_T"] },
+  ]);
+  assert.deepEqual(callsTo(r.gmail, "trash").map((e) => e.url), [
+    "/gmail/v1/users/me/messages/m1/trash", "/gmail/v1/users/me/messages/m2/trash"]);
+});
+
+test("restore puts a whole conversation back in one batchModify, not one untrash per message", () => {
+  const r = run(["restore", "personal", "m1", "m2"], [PREFIX_LABELS, BATCH_OK]);
   assert.equal(r.code, 0, r.stderr);
   assert.equal(r.stdout.trim(), "restored 2");
-  assert.equal(callsTo(r.gmail, "untrash").length, 2);
+  assert.equal(callsTo(r.gmail, "untrash").length, 0);
   assert.deepEqual(batchCalls(r.gmail).map((b) => b.body),
-    [{ ids: ["m1", "m2"], addLabelIds: ["INBOX"], removeLabelIds: ["Label_T", "Label_A"] }]);
-  assert.equal(callsTo(r.gmail, "modify").length, 0);
+    [{ ids: ["m1", "m2"], addLabelIds: ["INBOX"], removeLabelIds: ["TRASH", "Label_T", "Label_A"] }]);
+});
+
+test("restore falls back to one untrash per message when Gmail refuses to take TRASH off", () => {
+  const batch = { method: "POST", path: "/messages/batchModify$", responses: [REFUSED_400, { status: 204 }] };
+  const r = run(["restore", "personal", "m1", "m2"], [PREFIX_LABELS, batch, OK("/messages/[^/]+/untrash$")]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(callsTo(r.gmail, "untrash").length, 2);
+  assert.deepEqual(batchCalls(r.gmail).map((b) => b.body), [
+    { ids: ["m1", "m2"], addLabelIds: ["INBOX"], removeLabelIds: ["TRASH", "Label_T", "Label_A"] },
+    { ids: ["m1", "m2"], addLabelIds: ["INBOX"], removeLabelIds: ["Label_T", "Label_A"] },
+  ]);
+});
+
+test("a 400 on archive still fails: only trash and restore fall back", () => {
+  const batch = { method: "POST", path: "/messages/batchModify$", responses: [REFUSED_400] };
+  const r = run(["archive", "personal", "m1"], [PREFIX_LABELS, batch]);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /400/);
 });
 
 // ---------- unlabel ----------

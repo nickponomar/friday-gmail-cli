@@ -52,8 +52,8 @@
 //   draft-discard [account] <draftId>  delete an UNSENT draft (sent mail is never
 //                                 deletable here; this only affects drafts)
 //   archive [account] <msgId...>  remove INBOX, add <prefix>/archived. Batched.
-//   trash [account] <msgId...>    add <prefix>/trashed (batched), move to Trash
-//   restore [account] <msgId...>  undo: untrash + re-add INBOX, strip <prefix>/* (batched)
+//   trash [account] <msgId...>    move to Trash, add <prefix>/trashed. Batched.
+//   restore [account] <msgId...>  undo: out of Trash, re-add INBOX, strip <prefix>/*. Batched.
 //   label [account] <name> <msgId...>  add a label (created if missing). Batched.
 //   unlabel [account] <name> <msgId...>  remove a label (never created; a missing
 //                                 label is a clean no-op). Batched, works in Trash.
@@ -351,7 +351,9 @@ function rateLimitReason(status, text) {
 
 // opts.notFound: the message to die with on a 404 (or a 400 for a malformed
 // id) instead of the raw API error. opts.missingOk: return null on those instead.
-async function api(key, path, { notFound, missingOk, ...opts } = {}) {
+// opts.refusedOk: return REFUSED on a 400 (Gmail refusing the request as asked).
+const REFUSED = Symbol("refused");
+async function api(key, path, { notFound, missingOk, refusedOk, ...opts } = {}) {
   const token = await accessToken(key);
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${path}`, {
@@ -365,6 +367,7 @@ async function api(key, path, { notFound, missingOk, ...opts } = {}) {
     });
     const text = await res.text();
     if (res.ok) return text ? JSON.parse(text) : null;
+    if (res.status === 400 && refusedOk) return REFUSED;
     if (res.status === 404 || res.status === 400) {
       if (missingOk) return null;
       if (notFound) die(`${notFound} (${res.status})`);
@@ -417,14 +420,17 @@ async function labelId(key, name) {
 // Apply one label change to many messages: deduplicated ids, one
 // messages.batchModify per 1000 (the API maximum) instead of one modify per
 // message, which keeps large runs inside the per-user quota. Works on messages
-// in Trash too. Returns the number of distinct ids.
-async function batchModify(key, ids, change) {
+// in Trash too. Returns the number of distinct ids; with refusedOk, REFUSED if
+// Gmail refuses the change (a 400) instead of failing.
+async function batchModify(key, ids, change, { refusedOk } = {}) {
   const unique = [...new Set(ids)];
   for (let i = 0; i < unique.length; i += 1000) {
-    await api(key, "messages/batchModify", {
+    const r = await api(key, "messages/batchModify", {
       method: "POST",
       body: JSON.stringify({ ids: unique.slice(i, i + 1000), ...change }),
+      refusedOk,
     });
+    if (r === REFUSED) return REFUSED;
   }
   return unique.length;
 }
@@ -868,22 +874,34 @@ else if (cmd === "inbox") {
   console.log(`archived ${ids.length}`);
 } else if (cmd === "trash") {
   const [key, ids] = takeAccount(args, "trash [account] <msgId...>");
-  // The action label in one batchModify; messages.trash has no batch form.
+  // Gmail lets an app add the TRASH label itself (its labels guide lists TRASH
+  // as manually applicable), so moving to Trash is one batchModify per 1000
+  // ids, like archive; messages.trash has no batch form and took one request
+  // per message, one after another. Should Gmail refuse the label, each
+  // message goes through messages.trash as before.
   if (ids.length) {
     const trashedId = await labelId(key, `${LABEL_PREFIX}/trashed`);
-    await batchModify(key, ids, { addLabelIds: [trashedId] });
+    const moved = await batchModify(key, ids, { addLabelIds: [trashedId, "TRASH"], removeLabelIds: ["INBOX"] }, { refusedOk: true });
+    if (moved === REFUSED) {
+      await batchModify(key, ids, { addLabelIds: [trashedId] });
+      for (const id of new Set(ids)) await api(key, `messages/${id}/trash`, { method: "POST" });
+    }
   }
-  for (const id of ids) await api(key, `messages/${id}/trash`, { method: "POST" });
   console.log(`trashed ${ids.length}`);
 } else if (cmd === "restore") {
   // Undo a trash or archive: pull it back to the inbox and strip the <prefix>/*
-  // action labels. untrash is a safe no-op on a message that isn't in Trash.
+  // action labels, in one batchModify per 1000 ids (removing TRASH from a
+  // message that isn't in Trash changes nothing). Should Gmail refuse to take
+  // TRASH off that way, each message goes through messages.untrash as before.
   const [key, ids] = takeAccount(args, "restore [account] <msgId...>");
   if (ids.length) {
     const trashedId = await labelId(key, `${LABEL_PREFIX}/trashed`);
     const archivedId = await labelId(key, `${LABEL_PREFIX}/archived`);
-    for (const id of ids) await api(key, `messages/${id}/untrash`, { method: "POST" });
-    await batchModify(key, ids, { addLabelIds: ["INBOX"], removeLabelIds: [trashedId, archivedId] });
+    const back = await batchModify(key, ids, { addLabelIds: ["INBOX"], removeLabelIds: ["TRASH", trashedId, archivedId] }, { refusedOk: true });
+    if (back === REFUSED) {
+      for (const id of new Set(ids)) await api(key, `messages/${id}/untrash`, { method: "POST" });
+      await batchModify(key, ids, { addLabelIds: ["INBOX"], removeLabelIds: [trashedId, archivedId] });
+    }
   }
   console.log(`restored ${ids.length}`);
 } else if (cmd === "label") {
