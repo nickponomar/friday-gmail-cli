@@ -56,8 +56,9 @@ never suggest adding one, and never present a created draft as "sent".
   delete UNSENT drafts.
 - `archive` / `trash` / `restore` / `label` — triage verbs; archive and trash
   tag messages under the configured label prefix and `restore` undoes both.
-  Pass all the ids in one call: the label changes batch up to 1000 per request
-  (`trash` and `restore` still make one Trash request per message).
+  Pass all the ids in one call: all three batch up to 1000 per request
+  (`trash` adds Gmail's TRASH label; it falls back to one Trash request per
+  message only if Gmail refuses that).
 - `label [account] <name> <msgId...>` adds a label (created if missing; an
   existing one is matched regardless of case). `unlabel` with the same
   arguments removes it and never creates it: a missing label prints
